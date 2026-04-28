@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>POS Test</title>
+</head>
+<body>
+
+<h2>Add Product Test</h2>
+
+<input id="name" placeholder="Name"><br><br>
+<input id="category" placeholder="Category"><br><br>
+<input id="price" placeholder="Price"><br><br>
+<input id="stock" placeholder="Stock"><br><br>
+
+<button onclick="addProduct()">Add Product</button>
+
+<p id="result"></p>
+
+<script>
+function addProduct() {
+  fetch("http://localhost:5000/add-product", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      name: document.getElementById("name").value,
+      category: document.getElementById("category").value,
+      price: document.getElementById("price").value,
+      stock: document.getElementById("stock").value
+    })
+  })
+  .then(res => res.json())
+  .then(data => {
+    document.getElementById("result").innerText =
+      "Added: " + data.product.name;
+  });
+}
+</script>
+
+</body>
+</html>
