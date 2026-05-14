@@ -150,7 +150,6 @@ app.post("/create-bill", (req, res) => {
   });
 });
 
-
 app.post("/add-product", async (req, res) => {
   try {
     const { name, category, price, stock } = req.body;
@@ -185,56 +184,51 @@ app.post("/add-product", async (req, res) => {
   }
 });
 
-app.post("/reduce-stock/:id", (req, res) => {
-  const id = req.params.id;
+app.post("/reduce-stock/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
 
-  // Step 1: check stock first
-  const checkSql = "SELECT stock FROM products WHERE id = ?";
+    const check = await db.query(
+      "SELECT stock FROM products WHERE id = $1",
+      [id]
+    );
 
-  db.query(checkSql, [id], (err, result) => {
-    if (err) return res.json({ error: err });
-
-    if (result.length === 0) {
+    if (check.rows.length === 0) {
       return res.json({ error: "Product not found" });
     }
 
-    const stock = result[0].stock;
+    const stock = check.rows[0].stock;
 
-    // ❌ BLOCK IF NO STOCK
     if (stock <= 0) {
       return res.json({ error: "Out of stock" });
     }
 
-    // Step 2: reduce stock
-    const updateSql = `
-      UPDATE products 
-      SET stock = stock - 1 
-      WHERE id = ?
-    `;
+    await db.query(
+      "UPDATE products SET stock = stock - 1 WHERE id = $1",
+      [id]
+    );
 
-    db.query(updateSql, [id], (err2) => {
-      if (err2) return res.json({ error: err2 });
+    res.json({ message: "Stock reduced" });
 
-      res.json({ message: "Stock reduced" });
-    });
-  });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
+app.get("/sales-summary", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        COUNT(*) AS "totalBills",
+        COALESCE(SUM(total), 0) AS "totalRevenue"
+      FROM bills
+    `);
 
+    res.json(result.rows[0]);
 
-app.get("/sales-summary", (req, res) => {
-  const sql = `
-    SELECT 
-      COUNT(*) as totalBills,
-      SUM(total) as totalRevenue
-    FROM bills
-  `;
-
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result[0]);
-  });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 app.get("/bills", async (req, res) => {
@@ -424,17 +418,17 @@ app.get("/sales-chart", (req, res) => {
   });
 });
 
-app.get("/low-stock", (req, res) => {
-  const sql = `
-    SELECT * FROM products
-    WHERE stock <= 5
-  `;
+app.get("/low-stock", async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT * FROM products WHERE stock <= 5"
+    );
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
+    res.json(result.rows);
 
-    res.json(result);
-  });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 
