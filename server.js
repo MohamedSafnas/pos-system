@@ -18,7 +18,7 @@ db.connect()
   .then(() => console.log("Supabase database connected"))
   .catch((err) => console.log("DB connection failed:", err));
 
-const { load, save } = require("../pos-mobile/localStore");
+//const { load, save } = require("../pos-mobile/localStore");
 
 app.use(cors({
   origin: "*"
@@ -26,7 +26,7 @@ app.use(cors({
 
 app.use(express.json());
 
-app.post("/offline-bill", (req, res) => {
+/*app.post("/offline-bill", (req, res) => {
   let data = load();
 
   const bill = {
@@ -44,9 +44,9 @@ app.post("/offline-bill", (req, res) => {
     message: "Saved offline",
     bill
   });
-});
+});*/
 
-app.post("/sync-bills", (req, res) => {
+/*app.post("/sync-bills", (req, res) => {
   let data = load();
 
   let unsynced = data.filter(b => !b.synced);
@@ -66,7 +66,7 @@ app.post("/sync-bills", (req, res) => {
     message: "Synced successfully",
     count: unsynced.length
   });
-});
+});*/
 
 
 
