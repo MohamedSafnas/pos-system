@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>POS Dashboard</title>
+</head>
+<body>
+
+<h2>Product List</h2>
+
+<button onclick="loadProducts()">Load Products</button>
+
+<div id="list"></div>
+
+<script>
+function loadProducts() {
+  fetch("http://localhost:5000/products")
+    .then(res => res.json())
+    .then(data => {
+      let html = "";
+
+      data.forEach(p => {
+        html += `
+          <div style="border:1px solid #000; padding:10px; margin:10px;">
+            <h3>${p.name}</h3>
+            <p>Category: ${p.category}</p>
+            <p>Price: ${p.price}</p>
+            <p>Stock: ${p.stock}</p>
+            <p>ID: ${p.id}</p>
+          </div>
+        `;
+      });
+
+      document.getElementById("list").innerHTML = html;
+    });
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <title>Advanced Dashboard</title>
+</head>
+<body>
+
+<h2>Advanced Sales Dashboard</h2>
+
+<button onclick="loadAll()">Load Dashboard</button>
+
+<h3>Today Sales: Rs <span id="today">0</span></h3>
+<h3>Monthly Sales: Rs <span id="month">0</span></h3>
+<h3>Total Bills Today: <span id="count">0</span></h3>
+
+<h3>Top Selling Products</h3>
+<div id="top"></div>
+
+<h3>Sales Trend</h3>
+<canvas id="salesChart" width="400" height="200"></canvas>
+
+<h3 style="color:red;">Low Stock Alerts</h3>
+<div id="lowStock"></div>
+
+<script>
+function loadAll() {
+
+  // Today
+  fetch("http://localhost:5000/sales-today")
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById("today").innerText = data.totalSales || 0;
+      document.getElementById("count").innerText = data.billCount || 0;
+    });
+
+  // Month
+  fetch("http://localhost:5000/sales-month")
+    .then(res => res.json())
+    .then(data => {
+      document.getElementById("month").innerText = data.totalSales || 0;
+    });
+
+  // Top products
+  fetch("http://localhost:5000/top-products")
+    .then(res => res.json())
+    .then(data => {
+      let html = "";
+      data.forEach(p => {
+        html += `<p>${p.product_name} - Sold: ${p.totalSold}</p>`;
+      });
+      document.getElementById("top").innerHTML = html;
+    });
+    loadChart();
+    loadLowStock();
+}
+
+function loadChart() {
+  fetch("http://localhost:5000/sales-chart")
+    .then(res => res.json())
+    .then(data => {
+
+      const labels = data.map(d => d.date);
+      const values = data.map(d => d.total);
+
+      new Chart(document.getElementById("salesChart"), {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [{
+            label: "Sales",
+            data: values
+          }]
+        }
+      });
+
+    });
+}
+
+function loadLowStock() {
+  fetch("http://localhost:5000/low-stock")
+    .then(res => res.json())
+    .then(data => {
+      let html = "";
+
+      if (data.length === 0) {
+        html = "<p>No low stock items</p>";
+      } else {
+        data.forEach(p => {
+          html += `<p style="color:red;">
+            ${p.name} - Only ${p.stock} left!
+          </p>`;
+        });
+      }
+
+      document.getElementById("lowStock").innerHTML = html;
+    });
+}
+
+</script>
+
+</body>
+</html>

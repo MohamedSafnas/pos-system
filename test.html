@@ -18,7 +18,7 @@
 
 <script>
 function addProduct() {
-  fetch("https://pos-system-7sjw.onrender.com/add-product", {
+  fetch("http://localhost:5000/add-product", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -31,10 +31,14 @@ function addProduct() {
     })
   })
   .then(res => res.json())
-  .then(data => {
-    document.getElementById("result").innerText =
-      "Added: " + data.product.name;
-  });
+.then(data => {
+  console.log(data);
+
+  document.getElementById("result").innerHTML =
+    "Product ID: " + data.productId +
+    "<br><img src='" + data.qr + "' width='150'/>";
+});
+
 }
 </script>
 

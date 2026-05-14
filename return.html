@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Return System</title>
+</head>
+<body>
+
+<h2>Return Item</h2>
+
+<input id="billId" placeholder="Bill ID"><br><br>
+<input id="productName" placeholder="Product Name"><br><br>
+
+<label>
+  <input type="checkbox" id="override"> Force Return (Admin)
+</label><br><br>
+
+<button onclick="returnItem()">Check Return</button>
+
+<p id="result"></p>
+
+<script>
+function returnItem() {
+  fetch("http://localhost:5000/return-item", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      billId: document.getElementById("billId").value,
+      productName: document.getElementById("productName").value,
+      override: document.getElementById("override").checked
+    })
+  })
+  .then(res => res.json())
+  .then(data => {
+    document.getElementById("result").innerText = data.message;
+  });
+}
+</script>
+
+</body>
+</html>

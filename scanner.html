@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>QR Scanner POS</title>
+</head>
+<body>
+
+<h2>Scan Product QR</h2>
+
+<input id="qr" placeholder="Enter QR (e.g. product:1)">
+<button onclick="scan()">Scan</button>
+
+<div id="result"></div>
+
+<script>
+function scan() {
+  let qr = document.getElementById("qr").value;
+
+  let id = qr.split(":")[1]; // product:1 → 1
+
+  fetch("http://localhost:5000/product/" + id)
+    .then(res => res.json())
+    .then(p => {
+      document.getElementById("result").innerHTML = `
+        <h3>${p.name}</h3>
+        <p>Price: ${p.price}</p>
+        <p>Stock: ${p.stock}</p>
+      `;
+    });
+}
+</script>
+
+</body>
+</html>

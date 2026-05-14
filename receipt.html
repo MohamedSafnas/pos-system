@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Receipt</title>
+</head>
+<body>
+
+<h2>Bill Receipt</h2>
+
+<input id="billId" placeholder="Enter Bill ID">
+<button onclick="loadBill()">Load</button>
+
+<div id="output"></div>
+
+<script>
+function loadBill() {
+  let id = document.getElementById("billId").value;
+
+  fetch("http://localhost:5000/bill/" + id)
+    .then(res => res.json())
+    .then(data => {
+
+      let html = `
+        <h3>Bill ID: ${data.bill.id}</h3>
+        <p>Date: ${data.bill.created_at}</p>
+        <p>Customer: ${customerName || "Walk-in"}</p>
+<p>Phone: ${customerPhone || "-"}</p>
+        <hr>
+      `;
+
+      data.items.forEach(i => {
+        html += `<p>${i.product_name} - Rs ${i.price}</p>`;
+      });
+
+      html += `<hr><h3>Total: Rs ${data.bill.total}</h3>`;
+
+      document.getElementById("output").innerHTML = html;
+    });
+}
+</script>
+
+</body>
+</html>

@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>POS Billing</title>
+</head>
+<body>
+
+<h2>Billing System</h2>
+
+<input id="qr" placeholder="Scan QR (product:1)">
+<button onclick="addToCart()">Add</button>
+
+<h3>Cart</h3>
+<div id="cart"></div>
+
+<h3>Total: Rs <span id="total">0</span></h3>
+
+<script>
+let cart = [];
+let total = 0;
+
+function addToCart() {
+  let qr = document.getElementById("qr").value;
+  let id = qr.split(":")[1];
+
+  fetch("http://localhost:5000/product/" + id)
+    .then(res => res.json())
+    .then(p => {
+
+      cart.push(p);
+      total += parseFloat(p.price);
+
+      renderCart();
+    });
+}
+
+function renderCart() {
+  let html = "";
+
+  cart.forEach((p, index) => {
+    html += `
+      <div>
+        ${p.name} - Rs ${p.price}
+      </div>
+    `;
+  });
+
+  document.getElementById("cart").innerHTML = html;
+  document.getElementById("total").innerText = total;
+}
+
+function saveBill() {
+  fetch("http://localhost:5000/create-bill", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      items: cart,
+      total: total
+    })
+  })
+  .then(res => res.json())
+  .then(data => {
+    alert("Bill Saved ID: " + data.billId);
+  });
+}
+setInterval(() => {
+  fetch("http://localhost:5000/sync-bills", {
+    method: "POST"
+  });
+}, 60000); // every 1 min
+</script>
+
+<button onclick="saveBill()">Save Bill</button>
+</body>
+</html>
