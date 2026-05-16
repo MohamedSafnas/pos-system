@@ -131,11 +131,16 @@ app.post("/return-bill-item", async (req, res) => {
     }
 
     if (item.product_id) {
-      await client.query(
-        "UPDATE products SET stock = stock + $1 WHERE id = $2",
-        [returnQty, item.product_id]
-      );
-    }
+  await client.query(
+    "UPDATE products SET stock = stock + $1 WHERE id = $2",
+    [returnQty, item.product_id]
+  );
+} else {
+  await client.query(
+    "UPDATE products SET stock = stock + $1 WHERE name = $2",
+    [returnQty, item.product_name]
+  );
+}
 
     await client.query(
       "UPDATE bill_items SET returned_qty = returned_qty + $1 WHERE id = $2",
