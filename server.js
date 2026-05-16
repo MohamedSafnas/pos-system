@@ -105,49 +105,53 @@ app.get("/product/:id", async (req, res) => {
   }
 });
 
-app.get("/bill/:id", (req, res) => {
-  const id = req.params.id;
+app.get("/bill/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
 
-  db.query("SELECT * FROM bills WHERE id = ?", [id], (err, bill) => {
-    if (err) return res.json({ error: err });
+    const billResult = await db.query(
+      "SELECT * FROM bills WHERE id = $1",
+      [id]
+    );
 
-    db.query("SELECT * FROM bill_items WHERE bill_id = ?", [id], (err2, items) => {
-      if (err2) return res.json({ error: err2 });
+    if (billResult.rows.length === 0) {
+      return res.json({ error: "Bill not found" });
+    }
 
-      res.json({
-        bill: bill[0],
-        items: items
-      });
-    });
-  });
-});
-
-app.post("/create-bill", (req, res) => {
-  const { items, total } = req.body;
-  const today = new Date();
-  const returnDate = new Date();
-  returnDate.setDate(today.getDate() + 7);
-
-  db.query(
-  "INSERT INTO bills (total, return_deadline) VALUES (?, ?)",
-  [total, returnDate],
-  (err, result) => {
-    if (err) return res.json({ error: err });
-
-    const billId = result.insertId;
-
-    items.forEach(item => {
-      db.query(
-        "INSERT INTO bill_items (bill_id, product_name, price) VALUES (?, ?, ?)",
-        [billId, item.name, item.price]
-      );
-    });
+    const itemsResult = await db.query(
+      "SELECT * FROM bill_items WHERE bill_id = $1 ORDER BY id ASC",
+      [id]
+    );
 
     res.json({
-      message: "Bill saved",
-      billId: billId
+      bill: billResult.rows[0],
+      items: itemsResult.rows
     });
-  });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    const result = await db.query(
+      "SELECT * FROM users WHERE username = $1 AND password = $2",
+      [username, password]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Invalid login" });
+    }
+
+    res.json({
+      message: "Login success",
+      user: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 app.post("/add-product", async (req, res) => {
@@ -246,11 +250,31 @@ app.get("/bills", async (req, res) => {
 
 app.post("/save-bill", async (req, res) => {
   try {
-    const { items, total } = req.body;
+    const {
+      items,
+      subtotal,
+      discount,
+      total,
+      customerName,
+      customerPhone,
+      paymentMethod
+    } = req.body;
 
     const billResult = await db.query(
-      "INSERT INTO bills (total) VALUES ($1) RETURNING id",
-      [total]
+      `
+      INSERT INTO bills
+      (subtotal, discount, total, customer_name, customer_phone, payment_method)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+      `,
+      [
+        subtotal,
+        discount,
+        total,
+        customerName || null,
+        customerPhone || null,
+        paymentMethod || "Cash"
+      ]
     );
 
     const billId = billResult.rows[0].id;
@@ -259,10 +283,10 @@ app.post("/save-bill", async (req, res) => {
       await db.query(
         `
         INSERT INTO bill_items
-        (bill_id, product_name, price)
-        VALUES ($1, $2, $3)
+        (bill_id, product_id, product_name, price, qty)
+        VALUES ($1, $2, $3, $4, $5)
         `,
-        [billId, item.name, item.price]
+        [billId, item.id, item.name, item.price, item.qty]
       );
     }
 
@@ -270,152 +294,142 @@ app.post("/save-bill", async (req, res) => {
       message: "Bill saved",
       billId
     });
-
   } catch (err) {
     res.json({ error: err.message });
   }
 });
 
-app.post("/return-item", (req, res) => {
-  const { billId, productName, override } = req.body;
+app.post("/return-item", async (req, res) => {
+  try {
+    const { billId, productName, override } = req.body;
 
-  const blockedItems = ["white dress", "cut pieces"];
+    const blockedItems = ["white dress", "cut pieces"];
 
-  // 🔍 Check rules (only if NOT override)
-  const checkRules = (callback) => {
-    if (override === true) return callback(true, "Override");
+    if (!override) {
+      const billCheck = await db.query(
+        "SELECT * FROM bills WHERE id = $1 AND return_deadline >= CURRENT_DATE",
+        [billId]
+      );
 
-    db.query(
-      "SELECT * FROM bills WHERE id = ? AND return_deadline >= CURDATE()",
-      [billId],
-      (err, result) => {
-        if (err) return res.json({ error: err });
-
-        if (result.length === 0) {
-          return res.json({ message: "Return period expired" });
-        }
-
-        if (blockedItems.includes(productName.toLowerCase())) {
-          return res.json({ message: "Item not returnable" });
-        }
-
-        callback(true, "Normal");
+      if (billCheck.rows.length === 0) {
+        return res.json({ message: "Return period expired" });
       }
-    );
-  };
 
-  // 🚀 Main process
-  checkRules(() => {
-
-    // 1. Get product price
-    db.query(
-      "SELECT price FROM products WHERE name = ?",
-      [productName],
-      (err, result) => {
-        if (err || result.length === 0) {
-          return res.json({ message: "Product not found" });
-        }
-
-        const price = result[0].price;
-
-        // 2. Increase stock
-        db.query(
-          "UPDATE products SET stock = stock + 1 WHERE name = ?",
-          [productName]
-        );
-
-        // 3. Save return record
-        db.query(
-          "INSERT INTO returns (bill_id, product_name, price, override_used) VALUES (?, ?, ?, ?)",
-          [billId, productName, price, override]
-        );
-
-        res.json({ message: "Return processed successfully" });
+      if (blockedItems.includes(productName.toLowerCase())) {
+        return res.json({ message: "Item not returnable" });
       }
+    }
+
+    const productResult = await db.query(
+      "SELECT price FROM products WHERE name = $1",
+      [productName]
     );
 
-  });
+    if (productResult.rows.length === 0) {
+      return res.json({ message: "Product not found" });
+    }
+
+    const price = productResult.rows[0].price;
+
+    await db.query(
+      "UPDATE products SET stock = stock + 1 WHERE name = $1",
+      [productName]
+    );
+
+    await db.query(
+      `
+      INSERT INTO returns
+      (bill_id, product_name, price, override_used)
+      VALUES ($1, $2, $3, $4)
+      `,
+      [billId, productName, price, override || false]
+    );
+
+    res.json({ message: "Return processed successfully" });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 
-app.get("/today-sales", (req, res) => {
-  const sql = `
-    SELECT 
-      COUNT(*) as billsToday,
-      SUM(total) as revenueToday
-    FROM bills
-    WHERE DATE(created_at) = CURDATE()
-  `;
+app.get("/today-sales", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        COUNT(*) AS "billsToday",
+        COALESCE(SUM(total), 0) AS "revenueToday"
+      FROM bills
+      WHERE DATE(created_at) = CURRENT_DATE
+    `);
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
-app.get("/sales-today", (req, res) => {
-  const sql = `
-    SELECT 
-      SUM(total) AS totalSales,
-      COUNT(*) AS billCount
-    FROM bills
-    WHERE DATE(created_at) = CURDATE()
-  `;
+app.get("/sales-today", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        COALESCE(SUM(total), 0) AS "totalSales",
+        COUNT(*) AS "billCount"
+      FROM bills
+      WHERE DATE(created_at) = CURRENT_DATE
+    `);
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
-app.get("/sales-month", (req, res) => {
-  const sql = `
-    SELECT 
-      SUM(total) AS totalSales,
-      COUNT(*) AS billCount
-    FROM bills
-    WHERE MONTH(created_at) = MONTH(CURDATE())
-      AND YEAR(created_at) = YEAR(CURDATE())
-  `;
+app.get("/sales-month", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT 
+        COALESCE(SUM(total), 0) AS "totalSales",
+        COUNT(*) AS "billCount"
+      FROM bills
+      WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+        AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+    `);
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result[0]);
-  });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
-app.get("/top-products", (req, res) => {
-  const sql = `
-    SELECT product_name, COUNT(*) AS totalSold
-    FROM bill_items
-    GROUP BY product_name
-    ORDER BY totalSold DESC
-    LIMIT 5
-  `;
+app.get("/top-products", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT product_name, SUM(qty) AS "totalSold"
+      FROM bill_items
+      GROUP BY product_name
+      ORDER BY "totalSold" DESC
+      LIMIT 5
+    `);
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result);
-  });
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
-app.get("/sales-chart", (req, res) => {
-  const sql = `
-    SELECT DATE(created_at) as date, SUM(total) as total
-    FROM bills
-    GROUP BY DATE(created_at)
-    ORDER BY date ASC
-  `;
+app.get("/sales-chart", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT DATE(created_at) AS date, COALESCE(SUM(total), 0) AS total
+      FROM bills
+      GROUP BY DATE(created_at)
+      ORDER BY date ASC
+    `);
 
-  db.query(sql, (err, result) => {
-    if (err) return res.json({ error: err });
-
-    res.json(result);
-  });
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
 });
 
 app.get("/low-stock", async (req, res) => {
