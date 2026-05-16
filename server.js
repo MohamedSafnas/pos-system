@@ -75,6 +75,100 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+app.post("/return-bill-item", async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    const { billId, billItemId, qty, override } = req.body;
+
+    const blockedItems = ["white dress", "cut pieces"];
+
+    await client.query("BEGIN");
+
+    const itemResult = await client.query(
+      `
+      SELECT 
+        bi.*,
+        b.return_deadline
+      FROM bill_items bi
+      JOIN bills b ON b.id = bi.bill_id
+      WHERE bi.id = $1 AND bi.bill_id = $2
+      `,
+      [billItemId, billId]
+    );
+
+    if (itemResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+      return res.json({ error: "Bill item not found" });
+    }
+
+    const item = itemResult.rows[0];
+
+    if (!override) {
+      const expired =
+        item.return_deadline &&
+        new Date(item.return_deadline) < new Date();
+
+      if (expired) {
+        await client.query("ROLLBACK");
+        return res.json({ error: "Return period expired" });
+      }
+
+      if (blockedItems.includes(item.product_name.toLowerCase())) {
+        await client.query("ROLLBACK");
+        return res.json({ error: "Item not returnable" });
+      }
+    }
+
+    const returnQty = Number(qty || 1);
+    const itemQty = Number(item.qty || 1);
+    const returnedQty = Number(item.returned_qty || 0);
+    const remainingQty = itemQty - returnedQty;
+
+    if (returnQty <= 0 || returnQty > remainingQty) {
+      await client.query("ROLLBACK");
+      return res.json({ error: "Invalid return quantity" });
+    }
+
+    if (item.product_id) {
+      await client.query(
+        "UPDATE products SET stock = stock + $1 WHERE id = $2",
+        [returnQty, item.product_id]
+      );
+    }
+
+    await client.query(
+      "UPDATE bill_items SET returned_qty = returned_qty + $1 WHERE id = $2",
+      [returnQty, billItemId]
+    );
+
+    await client.query(
+      `
+      INSERT INTO returns
+      (bill_id, bill_item_id, product_id, product_name, price, qty, override_used)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        billId,
+        billItemId,
+        item.product_id,
+        item.product_name,
+        item.price,
+        returnQty,
+        override || false
+      ]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({ message: "Item returned successfully" });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
 
 app.get("/products", async (req, res) => {
   try {
@@ -127,6 +221,19 @@ app.get("/bill/:id", async (req, res) => {
       bill: billResult.rows[0],
       items: itemsResult.rows
     });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/bills", async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT * FROM bills ORDER BY id DESC"
+    );
+
+    res.json(result.rows);
+
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -229,19 +336,6 @@ app.get("/sales-summary", async (req, res) => {
     `);
 
     res.json(result.rows[0]);
-
-  } catch (err) {
-    res.json({ error: err.message });
-  }
-});
-
-app.get("/bills", async (req, res) => {
-  try {
-    const result = await db.query(
-      "SELECT * FROM bills ORDER BY id DESC"
-    );
-
-    res.json(result.rows);
 
   } catch (err) {
     res.json({ error: err.message });
@@ -442,6 +536,96 @@ app.get("/low-stock", async (req, res) => {
 
   } catch (err) {
     res.json({ error: err.message });
+  }
+});
+
+app.post("/checkout", async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    const {
+      items,
+      subtotal,
+      discount,
+      total,
+      customerName,
+      customerPhone,
+      paymentMethod
+    } = req.body;
+
+    await client.query("BEGIN");
+
+    for (const item of items) {
+      const qty = Number(item.qty || 1);
+
+      const stockResult = await client.query(
+        "SELECT stock FROM products WHERE id = $1 FOR UPDATE",
+        [item.id]
+      );
+
+      if (stockResult.rows.length === 0) {
+        throw new Error(item.name + " not found");
+      }
+
+      const stock = Number(stockResult.rows[0].stock);
+
+      if (stock < qty) {
+        throw new Error(item.name + " only has " + stock + " left");
+      }
+
+      await client.query(
+        "UPDATE products SET stock = stock - $1 WHERE id = $2",
+        [qty, item.id]
+      );
+    }
+
+    const billResult = await client.query(
+      `
+      INSERT INTO bills
+      (subtotal, discount, total, customer_name, customer_phone, payment_method, return_deadline)
+      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE + INTERVAL '7 days')
+      RETURNING id
+      `,
+      [
+        subtotal,
+        discount,
+        total,
+        customerName || null,
+        customerPhone || null,
+        paymentMethod || "Cash"
+      ]
+    );
+
+    const billId = billResult.rows[0].id;
+
+    for (const item of items) {
+      await client.query(
+        `
+        INSERT INTO bill_items
+        (bill_id, product_id, product_name, price, qty)
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [
+          billId,
+          item.id,
+          item.name,
+          item.price,
+          Number(item.qty || 1)
+        ]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Checkout completed",
+      billId
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
