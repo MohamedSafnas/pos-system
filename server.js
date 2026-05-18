@@ -555,11 +555,31 @@ app.post("/checkout", async (req, res) => {
       total,
       customerName,
       customerPhone,
-      paymentMethod
+      paymentMethod,
+      offlineRef
     } = req.body;
 
     await client.query("BEGIN");
 
+    // Prevent duplicate sync for offline bills
+    if (offlineRef) {
+      const existingBill = await client.query(
+        "SELECT id FROM bills WHERE offline_ref = $1",
+        [offlineRef]
+      );
+
+      if (existingBill.rows.length > 0) {
+        await client.query("COMMIT");
+
+        return res.json({
+          message: "Bill already synced",
+          billId: existingBill.rows[0].id,
+          alreadySynced: true
+        });
+      }
+    }
+
+    // Check and reduce stock
     for (const item of items) {
       const qty = Number(item.qty || 1);
 
@@ -584,11 +604,12 @@ app.post("/checkout", async (req, res) => {
       );
     }
 
+    // Save bill
     const billResult = await client.query(
       `
       INSERT INTO bills
-      (subtotal, discount, total, customer_name, customer_phone, payment_method, return_deadline)
-      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE + INTERVAL '7 days')
+      (subtotal, discount, total, customer_name, customer_phone, payment_method, offline_ref, return_deadline)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE + INTERVAL '7 days')
       RETURNING id
       `,
       [
@@ -597,12 +618,14 @@ app.post("/checkout", async (req, res) => {
         total,
         customerName || null,
         customerPhone || null,
-        paymentMethod || "Cash"
+        paymentMethod || "Cash",
+        offlineRef || null
       ]
     );
 
     const billId = billResult.rows[0].id;
 
+    // Save bill items
     for (const item of items) {
       await client.query(
         `
