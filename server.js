@@ -334,14 +334,17 @@ app.post("/reduce-stock/:id", async (req, res) => {
 app.get("/sales-summary", async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT 
-        COUNT(*) AS "totalBills",
-        COALESCE(SUM(total), 0) AS "totalRevenue"
-      FROM bills
+      SELECT
+        (SELECT COUNT(*) FROM bills) AS "totalBills",
+        (
+          COALESCE((SELECT SUM(total) FROM bills), 0)
+          -
+          COALESCE((SELECT SUM(price * qty) FROM returns), 0)
+        ) AS "totalRevenue",
+        COALESCE((SELECT SUM(price * qty) FROM returns), 0) AS "totalReturns"
     `);
 
     res.json(result.rows[0]);
-
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -471,10 +474,29 @@ app.get("/sales-today", async (req, res) => {
   try {
     const result = await db.query(`
       SELECT 
-        COALESCE(SUM(total), 0) AS "totalSales",
-        COUNT(*) AS "billCount"
-      FROM bills
-      WHERE DATE(created_at) = CURRENT_DATE
+        COALESCE((
+          SELECT SUM(total)
+          FROM bills
+          WHERE DATE(created_at) = CURRENT_DATE
+        ), 0)
+        -
+        COALESCE((
+          SELECT SUM(price * qty)
+          FROM returns
+          WHERE DATE(created_at) = CURRENT_DATE
+        ), 0) AS "totalSales",
+
+        (
+          SELECT COUNT(*)
+          FROM bills
+          WHERE DATE(created_at) = CURRENT_DATE
+        ) AS "billCount",
+
+        COALESCE((
+          SELECT SUM(price * qty)
+          FROM returns
+          WHERE DATE(created_at) = CURRENT_DATE
+        ), 0) AS "returnedAmount"
     `);
 
     res.json(result.rows[0]);
@@ -487,11 +509,33 @@ app.get("/sales-month", async (req, res) => {
   try {
     const result = await db.query(`
       SELECT 
-        COALESCE(SUM(total), 0) AS "totalSales",
-        COUNT(*) AS "billCount"
-      FROM bills
-      WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
-        AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        COALESCE((
+          SELECT SUM(total)
+          FROM bills
+          WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+            AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        ), 0)
+        -
+        COALESCE((
+          SELECT SUM(price * qty)
+          FROM returns
+          WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+            AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        ), 0) AS "totalSales",
+
+        (
+          SELECT COUNT(*)
+          FROM bills
+          WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+            AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        ) AS "billCount",
+
+        COALESCE((
+          SELECT SUM(price * qty)
+          FROM returns
+          WHERE EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+            AND EXTRACT(YEAR FROM created_at) = EXTRACT(YEAR FROM CURRENT_DATE)
+        ), 0) AS "returnedAmount"
     `);
 
     res.json(result.rows[0]);
@@ -503,9 +547,11 @@ app.get("/sales-month", async (req, res) => {
 app.get("/top-products", async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT product_name, SUM(qty) AS "totalSold"
-      FROM bill_items
-      GROUP BY product_name
+      SELECT 
+        bi.product_name,
+        SUM(bi.qty) - COALESCE(SUM(bi.returned_qty), 0) AS "totalSold"
+      FROM bill_items bi
+      GROUP BY bi.product_name
       ORDER BY "totalSold" DESC
       LIMIT 5
     `);
@@ -519,9 +565,21 @@ app.get("/top-products", async (req, res) => {
 app.get("/sales-chart", async (req, res) => {
   try {
     const result = await db.query(`
-      SELECT DATE(created_at) AS date, COALESCE(SUM(total), 0) AS total
-      FROM bills
-      GROUP BY DATE(created_at)
+      WITH sales AS (
+        SELECT DATE(created_at) AS date, SUM(total) AS sales_total
+        FROM bills
+        GROUP BY DATE(created_at)
+      ),
+      refunds AS (
+        SELECT DATE(created_at) AS date, SUM(price * qty) AS return_total
+        FROM returns
+        GROUP BY DATE(created_at)
+      )
+      SELECT
+        COALESCE(s.date, r.date) AS date,
+        COALESCE(s.sales_total, 0) - COALESCE(r.return_total, 0) AS total
+      FROM sales s
+      FULL OUTER JOIN refunds r ON s.date = r.date
       ORDER BY date ASC
     `);
 
