@@ -75,6 +75,96 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+
+app.get("/product-qr/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const result = await db.query(
+      "SELECT * FROM products WHERE id = $1",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Product not found" });
+    }
+
+    const qrData = `product:${id}`;
+
+    QRCode.toDataURL(qrData, (err, qrImage) => {
+      if (err) {
+        return res.json({ error: err.message });
+      }
+
+      res.json({
+        product: result.rows[0],
+        qr: qrImage
+      });
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/add-stock/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { qty } = req.body;
+
+    const result = await db.query(
+      `
+      UPDATE products
+      SET stock = stock + $1
+      WHERE id = $2
+      RETURNING *
+      `,
+      [Number(qty), id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Product not found" });
+    }
+
+    res.json({
+      message: "Stock updated",
+      product: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.put("/update-product/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { name, category, price, stock } = req.body;
+
+    const result = await db.query(
+      `
+      UPDATE products
+      SET name = $1,
+          category = $2,
+          price = $3,
+          stock = $4
+      WHERE id = $5
+      RETURNING *
+      `,
+      [name, category, price, stock, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Product not found" });
+    }
+
+    res.json({
+      message: "Product updated",
+      product: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.post("/return-bill-item", async (req, res) => {
   const client = await db.connect();
 
