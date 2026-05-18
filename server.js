@@ -26,6 +26,28 @@ app.use(cors({
 
 app.use(express.json());
 
+const costCodeMap = {
+  "1": "F",
+  "2": "A",
+  "3": "N",
+  "4": "C",
+  "5": "Y",
+  "6": "P",
+  "7": "O",
+  "8": "I",
+  "9": "M",
+  "0": "D"
+};
+
+function generateCostCode(cost) {
+  const roundedCost = Math.round(Number(cost || 0)).toString();
+
+  return roundedCost
+    .split("")
+    .map((digit) => costCodeMap[digit] || "")
+    .join("");
+}
+
 /*app.post("/offline-bill", (req, res) => {
   let data = load();
 
@@ -137,7 +159,9 @@ app.post("/add-stock/:id", async (req, res) => {
 app.put("/update-product/:id", async (req, res) => {
   try {
     const id = req.params.id;
-    const { name, category, price, stock } = req.body;
+    const { name, category, price, stock, cost } = req.body;
+
+    const costCode = generateCostCode(cost);
 
     const result = await db.query(
       `
@@ -145,11 +169,13 @@ app.put("/update-product/:id", async (req, res) => {
       SET name = $1,
           category = $2,
           price = $3,
-          stock = $4
-      WHERE id = $5
+          stock = $4,
+          cost = $5,
+          cost_code = $6
+      WHERE id = $7
       RETURNING *
       `,
-      [name, category, price, stock, id]
+      [name, category, price, stock, cost || 0, costCode, id]
     );
 
     if (result.rows.length === 0) {
@@ -358,15 +384,17 @@ app.post("/login", async (req, res) => {
 
 app.post("/add-product", async (req, res) => {
   try {
-    const { name, category, price, stock } = req.body;
+    const { name, category, price, stock, cost } = req.body;
+
+    const costCode = generateCostCode(cost);
 
     const result = await db.query(
       `
-      INSERT INTO products (name, category, price, stock)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO products (name, category, price, stock, cost, cost_code)
+      VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING id
       `,
-      [name, category, price, stock]
+      [name, category, price, stock, cost || 0, costCode]
     );
 
     const productId = result.rows[0].id;
@@ -381,10 +409,10 @@ app.post("/add-product", async (req, res) => {
       res.json({
         message: "Product saved",
         productId,
+        costCode,
         qr: qrImage
       });
     });
-
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -426,12 +454,26 @@ app.get("/sales-summary", async (req, res) => {
     const result = await db.query(`
       SELECT
         (SELECT COUNT(*) FROM bills) AS "totalBills",
+
         (
           COALESCE((SELECT SUM(total) FROM bills), 0)
           -
           COALESCE((SELECT SUM(price * qty) FROM returns), 0)
         ) AS "totalRevenue",
-        COALESCE((SELECT SUM(price * qty) FROM returns), 0) AS "totalReturns"
+
+        COALESCE((SELECT SUM(price * qty) FROM returns), 0) AS "totalReturns",
+
+        (
+          COALESCE((
+            SELECT SUM(
+              (price - COALESCE(cost, 0)) *
+              GREATEST(COALESCE(qty, 1) - COALESCE(returned_qty, 0), 0)
+            )
+            FROM bill_items
+          ), 0)
+          -
+          COALESCE((SELECT SUM(discount) FROM bills), 0)
+        ) AS "totalProfit"
     `);
 
     res.json(result.rows[0]);
@@ -709,6 +751,8 @@ app.post("/checkout", async (req, res) => {
 
     await client.query("BEGIN");
 
+    const productCostMap = {};
+
     // Prevent duplicate sync for offline bills
     if (offlineRef) {
       const existingBill = await client.query(
@@ -732,8 +776,8 @@ app.post("/checkout", async (req, res) => {
       const qty = Number(item.qty || 1);
 
       const stockResult = await client.query(
-        "SELECT stock FROM products WHERE id = $1 FOR UPDATE",
-        [item.id]
+  "SELECT stock, cost FROM products WHERE id = $1 FOR UPDATE",
+  [item.id]
       );
 
       if (stockResult.rows.length === 0) {
@@ -741,6 +785,7 @@ app.post("/checkout", async (req, res) => {
       }
 
       const stock = Number(stockResult.rows[0].stock);
+      productCostMap[item.id] = Number(stockResult.rows[0].cost || 0);
 
       if (stock < qty) {
         throw new Error(item.name + " only has " + stock + " left");
@@ -778,16 +823,17 @@ app.post("/checkout", async (req, res) => {
       await client.query(
         `
         INSERT INTO bill_items
-        (bill_id, product_id, product_name, price, qty)
-        VALUES ($1, $2, $3, $4, $5)
+(bill_id, product_id, product_name, price, qty, cost)
+VALUES ($1, $2, $3, $4, $5, $6)
         `,
         [
-          billId,
-          item.id,
-          item.name,
-          item.price,
-          Number(item.qty || 1)
-        ]
+  billId,
+  item.id,
+  item.name,
+  item.price,
+  Number(item.qty || 1),
+  productCostMap[item.id] || 0
+]
       );
     }
 
