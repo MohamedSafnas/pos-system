@@ -98,6 +98,25 @@ app.get("/", (req, res) => {
 });
 
 
+app.get("/customer/:phone", async (req, res) => {
+  try {
+    const phone = req.params.phone;
+
+    const result = await db.query(
+      "SELECT * FROM customers WHERE phone = $1",
+      [phone]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Customer not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/category-options", async (req, res) => {
   try {
     const result = await db.query(`
@@ -1108,22 +1127,60 @@ app.post("/checkout", async (req, res) => {
 
     await client.query("BEGIN");
 
+    let customerId = null;
+    let pointsEarned = Math.floor(Number(total || 0) / 100);
+    let customerTotalPoints = 0;
+
+if (customerPhone) {
+  const customerResult = await client.query(
+    `
+    INSERT INTO customers (name, phone, points, total_spent)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (phone)
+    DO UPDATE SET
+      name = COALESCE(EXCLUDED.name, customers.name),
+      points = customers.points + EXCLUDED.points,
+      total_spent = customers.total_spent + EXCLUDED.total_spent
+    RETURNING *
+    `,
+    [
+      customerName || "Walk-in",
+      customerPhone,
+      pointsEarned,
+      total
+    ]
+  );
+
+  customerId = customerResult.rows[0].id;
+  customerTotalPoints = customerResult.rows[0].points;
+}
+
     if (offlineRef) {
-      const existingBill = await client.query(
-        "SELECT id FROM bills WHERE offline_ref = $1",
-        [offlineRef]
-      );
+  const existingBill = await client.query(
+    `
+    SELECT 
+      b.id,
+      b.points_earned,
+      c.points AS customer_total_points
+    FROM bills b
+    LEFT JOIN customers c ON c.id = b.customer_id
+    WHERE b.offline_ref = $1
+    `,
+    [offlineRef]
+  );
 
-      if (existingBill.rows.length > 0) {
-        await client.query("COMMIT");
+  if (existingBill.rows.length > 0) {
+    await client.query("COMMIT");
 
-        return res.json({
-          message: "Bill already synced",
-          billId: existingBill.rows[0].id,
-          alreadySynced: true
-        });
-      }
-    }
+    return res.json({
+      message: "Bill already synced",
+      billId: existingBill.rows[0].id,
+      pointsEarned: existingBill.rows[0].points_earned || 0,
+      customerTotalPoints: existingBill.rows[0].customer_total_points || 0,
+      alreadySynced: true
+    });
+  }
+}
 
     const itemCostMap = {};
 
@@ -1205,19 +1262,21 @@ app.post("/checkout", async (req, res) => {
     const billResult = await client.query(
       `
       INSERT INTO bills
-      (subtotal, discount, total, customer_name, customer_phone, payment_method, offline_ref, return_deadline)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE + INTERVAL '7 days')
-      RETURNING id
+(subtotal, discount, total, customer_name, customer_phone, payment_method, offline_ref, customer_id, points_earned, return_deadline)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_DATE + INTERVAL '7 days')
+RETURNING id
       `,
       [
-        subtotal,
-        discount,
-        total,
-        customerName || null,
-        customerPhone || null,
-        paymentMethod || "Cash",
-        offlineRef || null
-      ]
+  subtotal,
+  discount,
+  total,
+  customerName || null,
+  customerPhone || null,
+  paymentMethod || "Cash",
+  offlineRef || null,
+  customerId,
+  pointsEarned
+]
     );
 
     const billId = billResult.rows[0].id;
@@ -1247,9 +1306,12 @@ app.post("/checkout", async (req, res) => {
     await client.query("COMMIT");
 
     res.json({
-      message: "Checkout completed",
-      billId
-    });
+  message: "Checkout completed",
+  billId,
+  pointsEarned,
+  customerTotalPoints
+});
+
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
