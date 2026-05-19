@@ -98,6 +98,202 @@ app.get("/", (req, res) => {
 });
 
 
+
+
+app.get("/variant-qr/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const result = await db.query(
+      `
+      SELECT
+        v.id AS variant_id,
+        v.product_id,
+        v.size,
+        v.sku,
+        COALESCE(v.price, p.price) AS price,
+        COALESCE(v.cost_code, p.cost_code) AS cost_code,
+        v.stock,
+        p.name,
+        p.category
+      FROM product_variants v
+      JOIN products p ON p.id = v.product_id
+      WHERE v.id = $1
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Variant not found" });
+    }
+
+    const qrData = `variant:${id}`;
+
+    QRCode.toDataURL(qrData, (err, qrImage) => {
+      if (err) {
+        return res.json({ error: err.message });
+      }
+
+      res.json({
+        variant: result.rows[0],
+        qr: qrImage
+      });
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/add-variant-stock/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { qty } = req.body;
+
+    const result = await db.query(
+      `
+      UPDATE product_variants
+      SET stock = stock + $1
+      WHERE id = $2
+      RETURNING *
+      `,
+      [Number(qty), id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Variant not found" });
+    }
+
+    res.json({
+      message: "Variant stock updated",
+      variant: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.put("/update-variant/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { size, sku, price, cost, stock } = req.body;
+
+    const costCode = generateCostCode(cost);
+
+    const result = await db.query(
+      `
+      UPDATE product_variants
+      SET size = $1,
+          sku = $2,
+          price = $3,
+          cost = $4,
+          cost_code = $5,
+          stock = $6
+      WHERE id = $7
+      RETURNING *
+      `,
+      [size, sku || null, price || null, cost || 0, costCode, stock || 0, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Variant not found" });
+    }
+
+    res.json({
+      message: "Variant updated",
+      variant: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/variant/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const result = await db.query(
+      `
+      SELECT
+        v.id AS variant_id,
+        v.product_id,
+        v.size,
+        v.sku,
+        COALESCE(v.price, p.price) AS price,
+        COALESCE(v.cost, p.cost, 0) AS cost,
+        COALESCE(v.cost_code, p.cost_code) AS cost_code,
+        v.stock,
+        p.name,
+        p.category
+      FROM product_variants v
+      JOIN products p ON p.id = v.product_id
+      WHERE v.id = $1
+      `,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Variant not found" });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/product/:id/variants", async (req, res) => {
+  try {
+    const productId = req.params.id;
+
+    const result = await db.query(
+      `
+      SELECT *
+      FROM product_variants
+      WHERE product_id = $1
+      ORDER BY id ASC
+      `,
+      [productId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/add-variant", async (req, res) => {
+  try {
+    const { product_id, size, sku, price, cost, stock } = req.body;
+
+    const costCode = generateCostCode(cost);
+
+    const result = await db.query(
+      `
+      INSERT INTO product_variants
+      (product_id, size, sku, price, cost, cost_code, stock)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+      `,
+      [
+        product_id,
+        size,
+        sku || null,
+        price || null,
+        cost || 0,
+        costCode,
+        stock || 0
+      ]
+    );
+
+    res.json({
+      message: "Variant added",
+      variant: result.rows[0]
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/product-qr/:id", async (req, res) => {
   try {
     const id = req.params.id;
@@ -246,11 +442,17 @@ app.post("/return-bill-item", async (req, res) => {
       return res.json({ error: "Invalid return quantity" });
     }
 
-    if (item.product_id) {
+    if (item.variant_id) {
+  await client.query(
+    "UPDATE product_variants SET stock = stock + $1 WHERE id = $2",
+    [returnQty, item.variant_id]
+  );
+} else if (item.product_id) {
   await client.query(
     "UPDATE products SET stock = stock + $1 WHERE id = $2",
     [returnQty, item.product_id]
   );
+
 } else {
   await client.query(
     "UPDATE products SET stock = stock + $1 WHERE name = $2",
@@ -266,18 +468,20 @@ app.post("/return-bill-item", async (req, res) => {
     await client.query(
       `
       INSERT INTO returns
-      (bill_id, bill_item_id, product_id, product_name, price, qty, override_used)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+(bill_id, bill_item_id, product_id, variant_id, size, product_name, price, qty, override_used)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       `,
       [
-        billId,
-        billItemId,
-        item.product_id,
-        item.product_name,
-        item.price,
-        returnQty,
-        override || false
-      ]
+  billId,
+  billItemId,
+  item.product_id,
+  item.variant_id || null,
+  item.size || null,
+  item.product_name,
+  item.price,
+  returnQty,
+  override || false
+]
     );
 
     await client.query("COMMIT");
@@ -751,9 +955,6 @@ app.post("/checkout", async (req, res) => {
 
     await client.query("BEGIN");
 
-    const productCostMap = {};
-
-    // Prevent duplicate sync for offline bills
     if (offlineRef) {
       const existingBill = await client.query(
         "SELECT id FROM bills WHERE offline_ref = $1",
@@ -771,33 +972,60 @@ app.post("/checkout", async (req, res) => {
       }
     }
 
-    // Check and reduce stock
+    const itemCostMap = {};
+
     for (const item of items) {
       const qty = Number(item.qty || 1);
 
-      const stockResult = await client.query(
-  "SELECT stock, cost FROM products WHERE id = $1 FOR UPDATE",
-  [item.id]
-      );
+      if (item.variant_id) {
+        const stockResult = await client.query(
+          "SELECT stock, cost FROM product_variants WHERE id = $1 FOR UPDATE",
+          [item.variant_id]
+        );
 
-      if (stockResult.rows.length === 0) {
-        throw new Error(item.name + " not found");
+        if (stockResult.rows.length === 0) {
+          throw new Error(item.name + " size " + item.size + " not found");
+        }
+
+        const stock = Number(stockResult.rows[0].stock);
+
+        if (stock < qty) {
+          throw new Error(
+            item.name + " size " + item.size + " only has " + stock + " left"
+          );
+        }
+
+        await client.query(
+          "UPDATE product_variants SET stock = stock - $1 WHERE id = $2",
+          [qty, item.variant_id]
+        );
+
+        itemCostMap[item.variant_id] = Number(stockResult.rows[0].cost || 0);
+      } else {
+        const stockResult = await client.query(
+          "SELECT stock, cost FROM products WHERE id = $1 FOR UPDATE",
+          [item.id]
+        );
+
+        if (stockResult.rows.length === 0) {
+          throw new Error(item.name + " not found");
+        }
+
+        const stock = Number(stockResult.rows[0].stock);
+
+        if (stock < qty) {
+          throw new Error(item.name + " only has " + stock + " left");
+        }
+
+        await client.query(
+          "UPDATE products SET stock = stock - $1 WHERE id = $2",
+          [qty, item.id]
+        );
+
+        itemCostMap[item.id] = Number(stockResult.rows[0].cost || 0);
       }
-
-      const stock = Number(stockResult.rows[0].stock);
-      productCostMap[item.id] = Number(stockResult.rows[0].cost || 0);
-
-      if (stock < qty) {
-        throw new Error(item.name + " only has " + stock + " left");
-      }
-
-      await client.query(
-        "UPDATE products SET stock = stock - $1 WHERE id = $2",
-        [qty, item.id]
-      );
     }
 
-    // Save bill
     const billResult = await client.query(
       `
       INSERT INTO bills
@@ -818,22 +1046,25 @@ app.post("/checkout", async (req, res) => {
 
     const billId = billResult.rows[0].id;
 
-    // Save bill items
     for (const item of items) {
+      const costKey = item.variant_id || item.id;
+
       await client.query(
         `
         INSERT INTO bill_items
-(bill_id, product_id, product_name, price, qty, cost)
-VALUES ($1, $2, $3, $4, $5, $6)
+        (bill_id, product_id, variant_id, size, product_name, price, qty, cost)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         `,
         [
-  billId,
-  item.id,
-  item.name,
-  item.price,
-  Number(item.qty || 1),
-  productCostMap[item.id] || 0
-]
+          billId,
+          item.product_id || item.id,
+          item.variant_id || null,
+          item.size || null,
+          item.name,
+          item.price,
+          Number(item.qty || 1),
+          itemCostMap[costKey] || 0
+        ]
       );
     }
 
