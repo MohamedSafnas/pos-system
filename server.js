@@ -98,6 +98,22 @@ app.get("/", (req, res) => {
 });
 
 
+app.get("/category-options", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT gender), NULL) AS genders,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT category), NULL) AS categories,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT subcategory), NULL) AS subcategories
+      FROM products
+    `);
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/variants", async (req, res) => {
   try {
     const result = await db.query(`
@@ -460,24 +476,36 @@ app.post("/add-stock/:id", async (req, res) => {
 app.put("/update-product/:id", async (req, res) => {
   try {
     const id = req.params.id;
-    const { name, category, price, stock, cost } = req.body;
+    const { name, gender, category, subcategory, price, stock, cost } = req.body;
 
     const costCode = generateCostCode(cost);
 
     const result = await db.query(
-      `
-      UPDATE products
-      SET name = $1,
-          category = $2,
-          price = $3,
-          stock = $4,
-          cost = $5,
-          cost_code = $6
-      WHERE id = $7
-      RETURNING *
-      `,
-      [name, category, price, stock, cost || 0, costCode, id]
-    );
+  `
+  UPDATE products
+  SET name = $1,
+      gender = $2,
+      category = $3,
+      subcategory = $4,
+      price = $5,
+      stock = $6,
+      cost = $7,
+      cost_code = $8
+  WHERE id = $9
+  RETURNING *
+  `,
+  [
+    name,
+    gender || null,
+    category || null,
+    subcategory || null,
+    price,
+    stock,
+    cost || 0,
+    costCode,
+    id
+  ]
+);
 
     if (result.rows.length === 0) {
       return res.json({ error: "Product not found" });
@@ -704,18 +732,28 @@ app.post("/login", async (req, res) => {
 
 app.post("/add-product", async (req, res) => {
   try {
-    const { name, category, price, stock, cost } = req.body;
+    const { name, gender, category, subcategory, price, stock, cost } = req.body;
 
     const costCode = generateCostCode(cost);
 
     const result = await db.query(
-      `
-      INSERT INTO products (name, category, price, stock, cost, cost_code)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING id
-      `,
-      [name, category, price, stock, cost || 0, costCode]
-    );
+  `
+  INSERT INTO products
+  (name, gender, category, subcategory, price, stock, cost, cost_code)
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  RETURNING id
+  `,
+  [
+    name,
+    gender || null,
+    category || null,
+    subcategory || null,
+    price,
+    stock,
+    cost || 0,
+    costCode
+  ]
+);
 
     const productId = result.rows[0].id;
 
@@ -904,7 +942,6 @@ app.post("/return-item", async (req, res) => {
     res.json({ error: err.message });
   }
 });
-
 
 app.get("/today-sales", async (req, res) => {
   try {
