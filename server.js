@@ -652,11 +652,14 @@ app.post("/return-bill-item", async (req, res) => {
     const itemResult = await client.query(
       `
       SELECT 
-        bi.*,
-        b.return_deadline
-      FROM bill_items bi
-      JOIN bills b ON b.id = bi.bill_id
-      WHERE bi.id = $1 AND bi.bill_id = $2
+  bi.*,
+  b.return_deadline,
+  b.customer_id,
+  b.subtotal,
+  b.points_earned
+FROM bill_items bi
+JOIN bills b ON b.id = bi.bill_id
+WHERE bi.id = $1 AND bi.bill_id = $2
       `,
       [billItemId, billId],
     );
@@ -688,6 +691,23 @@ app.post("/return-bill-item", async (req, res) => {
     const returnedQty = Number(item.returned_qty || 0);
     const remainingQty = itemQty - returnedQty;
 
+    const returnAmount = Number(item.price || 0) * returnQty;
+
+let pointsDeducted = 0;
+
+if (item.customer_id) {
+  const billSubtotal = Number(item.subtotal || 0);
+  const billPointsEarned = Number(item.points_earned || 0);
+
+  if (billSubtotal > 0 && billPointsEarned > 0) {
+    pointsDeducted = Math.floor(
+      (returnAmount / billSubtotal) * billPointsEarned
+    );
+  } else {
+    pointsDeducted = Math.floor(returnAmount / 100);
+  }
+}
+
     if (returnQty <= 0 || returnQty > remainingQty) {
       await client.query("ROLLBACK");
       return res.json({ error: "Invalid return quantity" });
@@ -718,25 +738,29 @@ app.post("/return-bill-item", async (req, res) => {
     await client.query(
       `
       INSERT INTO returns
-(bill_id, bill_item_id, product_id, variant_id, size, product_name, price, qty, override_used)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+(bill_id, bill_item_id, product_id, variant_id, size, product_name, price, qty, override_used, points_deducted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
-        billId,
-        billItemId,
-        item.product_id,
-        item.variant_id || null,
-        item.size || null,
-        item.product_name,
-        item.price,
-        returnQty,
-        override || false,
-      ],
+  billId,
+  billItemId,
+  item.product_id,
+  item.variant_id || null,
+  item.size || null,
+  item.product_name,
+  item.price,
+  returnQty,
+  override || false,
+  pointsDeducted
+],
     );
 
     await client.query("COMMIT");
 
-    res.json({ message: "Item returned successfully" });
+    res.json({
+  message: "Item returned successfully",
+  pointsDeducted
+});
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
