@@ -98,7 +98,30 @@ app.get("/", (req, res) => {
 });
 
 
+app.get("/variants", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        v.id AS variant_id,
+        v.product_id,
+        v.size,
+        v.sku,
+        COALESCE(v.price, p.price) AS price,
+        COALESCE(v.cost, p.cost, 0) AS cost,
+        COALESCE(v.cost_code, p.cost_code) AS cost_code,
+        v.stock,
+        p.name,
+        p.category
+      FROM product_variants v
+      JOIN products p ON p.id = v.product_id
+      ORDER BY p.name ASC, v.id ASC
+    `);
 
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
 
 app.get("/variant-qr/:id", async (req, res) => {
   try {
