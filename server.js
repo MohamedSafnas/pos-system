@@ -1127,33 +1127,6 @@ app.post("/checkout", async (req, res) => {
 
     await client.query("BEGIN");
 
-    let customerId = null;
-    let pointsEarned = Math.floor(Number(total || 0) / 100);
-    let customerTotalPoints = 0;
-
-if (customerPhone) {
-  const customerResult = await client.query(
-    `
-    INSERT INTO customers (name, phone, points, total_spent)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (phone)
-    DO UPDATE SET
-      name = COALESCE(EXCLUDED.name, customers.name),
-      points = customers.points + EXCLUDED.points,
-      total_spent = customers.total_spent + EXCLUDED.total_spent
-    RETURNING *
-    `,
-    [
-      customerName || "Walk-in",
-      customerPhone,
-      pointsEarned,
-      total
-    ]
-  );
-
-  customerId = customerResult.rows[0].id;
-  customerTotalPoints = customerResult.rows[0].points;
-}
 
     if (offlineRef) {
   const existingBill = await client.query(
@@ -1180,6 +1153,34 @@ if (customerPhone) {
       alreadySynced: true
     });
   }
+}
+
+    let customerId = null;
+    let pointsEarned = Math.floor(Number(total || 0) / 100);
+    let customerTotalPoints = 0;
+
+if (customerPhone) {
+  const customerResult = await client.query(
+    `
+    INSERT INTO customers (name, phone, points, total_spent)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (phone)
+    DO UPDATE SET
+      name = COALESCE(EXCLUDED.name, customers.name),
+      points = customers.points + EXCLUDED.points,
+      total_spent = customers.total_spent + EXCLUDED.total_spent
+    RETURNING *
+    `,
+    [
+      customerName || "Walk-in",
+      customerPhone,
+      pointsEarned,
+      total
+    ]
+  );
+
+  customerId = customerResult.rows[0].id;
+  customerTotalPoints = customerResult.rows[0].points;
 }
 
     const itemCostMap = {};
