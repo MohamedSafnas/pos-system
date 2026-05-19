@@ -1291,26 +1291,39 @@ if (customerPhone) {
     }
 
     const billResult = await client.query(
-      `
-      INSERT INTO bills
-(subtotal, discount, total, customer_name, customer_phone, payment_method, offline_ref, customer_id, points_earned, return_deadline)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_DATE + INTERVAL '7 days')
-RETURNING id
-      `,
-      [
-  subtotal,
-  discount,
-  total,
-  customerName || null,
-  customerPhone || null,
-  paymentMethod || "Cash",
-  offlineRef || null,
-  customerId,
-  pointsEarned,
-  redeemPoints,
-  redeemPoints
-],
-    );
+  `
+  INSERT INTO bills
+  (
+    subtotal,
+    discount,
+    total,
+    customer_name,
+    customer_phone,
+    payment_method,
+    offline_ref,
+    customer_id,
+    points_earned,
+    points_redeemed,
+    point_discount,
+    return_deadline
+  )
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_DATE + INTERVAL '7 days')
+  RETURNING id
+  `,
+  [
+    subtotal,
+    discount,
+    total,
+    customerName || null,
+    customerPhone || null,
+    paymentMethod || "Cash",
+    offlineRef || null,
+    customerId,
+    pointsEarned,
+    redeemPoints,
+    redeemPoints
+  ]
+);
 
     const billId = billResult.rows[0].id;
 
