@@ -295,6 +295,13 @@ app.post("/add-variant", async (req, res) => {
       INSERT INTO product_variants
       (product_id, size, sku, price, cost, cost_code, stock)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (product_id, size)
+      DO UPDATE SET
+        sku = EXCLUDED.sku,
+        price = EXCLUDED.price,
+        cost = EXCLUDED.cost,
+        cost_code = EXCLUDED.cost_code,
+        stock = EXCLUDED.stock
       RETURNING *
       `,
       [
@@ -304,12 +311,12 @@ app.post("/add-variant", async (req, res) => {
         price || null,
         cost || 0,
         costCode,
-        stock || 0
+        Number(stock || 0)
       ]
     );
 
     res.json({
-      message: "Variant added",
+      message: "Variant saved",
       variant: result.rows[0]
     });
   } catch (err) {
