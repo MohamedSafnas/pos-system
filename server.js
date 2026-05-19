@@ -527,7 +527,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 
 app.get("/products", async (req, res) => {
   try {
-    const result = await db.query("SELECT * FROM products");
+    const result = await db.query(`
+      SELECT
+        p.*,
+        COALESCE(SUM(v.stock), 0) AS variant_stock,
+        COUNT(v.id) AS variant_count,
+        CASE
+          WHEN COUNT(v.id) > 0 THEN COALESCE(SUM(v.stock), 0)
+          ELSE p.stock
+        END AS display_stock
+      FROM products p
+      LEFT JOIN product_variants v ON v.product_id = p.id
+      GROUP BY p.id
+      ORDER BY p.id DESC
+    `);
+
     res.json(result.rows);
   } catch (err) {
     res.json({ error: err.message });
