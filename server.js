@@ -200,6 +200,49 @@ app.put("/update-variant/:id", async (req, res) => {
     const id = req.params.id;
     const { size, sku, price, cost, stock } = req.body;
 
+    const sizeStock = Number(stock || 0);
+
+    const variantCheck = await db.query(
+      "SELECT product_id FROM product_variants WHERE id = $1",
+      [id]
+    );
+
+    if (variantCheck.rows.length === 0) {
+      return res.json({ error: "Variant not found" });
+    }
+
+    const productId = variantCheck.rows[0].product_id;
+
+    const productResult = await db.query(
+      "SELECT stock FROM products WHERE id = $1",
+      [productId]
+    );
+
+    const totalProductStock = Number(productResult.rows[0].stock || 0);
+
+    const usedResult = await db.query(
+      `
+      SELECT COALESCE(SUM(stock), 0) AS used_stock
+      FROM product_variants
+      WHERE product_id = $1
+        AND id <> $2
+      `,
+      [productId, id]
+    );
+
+    const usedStockOtherSizes = Number(usedResult.rows[0].used_stock || 0);
+    const newTotalSizeStock = usedStockOtherSizes + sizeStock;
+
+    if (newTotalSizeStock > totalProductStock) {
+      return res.json({
+        error:
+          "Size stock cannot exceed product total stock. Total stock: " +
+          totalProductStock +
+          ", already allocated: " +
+          usedStockOtherSizes
+      });
+    }
+
     const costCode = generateCostCode(cost);
 
     const result = await db.query(
@@ -214,12 +257,8 @@ app.put("/update-variant/:id", async (req, res) => {
       WHERE id = $7
       RETURNING *
       `,
-      [size, sku || null, price || null, cost || 0, costCode, stock || 0, id]
+      [size, sku || null, price || null, cost || 0, costCode, sizeStock, id]
     );
-
-    if (result.rows.length === 0) {
-      return res.json({ error: "Variant not found" });
-    }
 
     res.json({
       message: "Variant updated",
@@ -288,6 +327,42 @@ app.post("/add-variant", async (req, res) => {
   try {
     const { product_id, size, sku, price, cost, stock } = req.body;
 
+    const sizeStock = Number(stock || 0);
+
+    const productResult = await db.query(
+      "SELECT stock FROM products WHERE id = $1",
+      [product_id]
+    );
+
+    if (productResult.rows.length === 0) {
+      return res.json({ error: "Product not found" });
+    }
+
+    const totalProductStock = Number(productResult.rows[0].stock || 0);
+
+    const usedResult = await db.query(
+      `
+      SELECT COALESCE(SUM(stock), 0) AS used_stock
+      FROM product_variants
+      WHERE product_id = $1
+        AND size <> $2
+      `,
+      [product_id, size]
+    );
+
+    const usedStockOtherSizes = Number(usedResult.rows[0].used_stock || 0);
+    const newTotalSizeStock = usedStockOtherSizes + sizeStock;
+
+    if (newTotalSizeStock > totalProductStock) {
+      return res.json({
+        error:
+          "Size stock cannot exceed product total stock. Total stock: " +
+          totalProductStock +
+          ", already allocated: " +
+          usedStockOtherSizes
+      });
+    }
+
     const costCode = generateCostCode(cost);
 
     const result = await db.query(
@@ -311,7 +386,7 @@ app.post("/add-variant", async (req, res) => {
         price || null,
         cost || 0,
         costCode,
-        Number(stock || 0)
+        sizeStock
       ]
     );
 
@@ -477,16 +552,15 @@ app.post("/return-bill-item", async (req, res) => {
     "UPDATE product_variants SET stock = stock + $1 WHERE id = $2",
     [returnQty, item.variant_id]
   );
-} else if (item.product_id) {
+
   await client.query(
     "UPDATE products SET stock = stock + $1 WHERE id = $2",
     [returnQty, item.product_id]
   );
-
-} else {
+} else if (item.product_id) {
   await client.query(
-    "UPDATE products SET stock = stock + $1 WHERE name = $2",
-    [returnQty, item.product_name]
+    "UPDATE products SET stock = stock + $1 WHERE id = $2",
+    [returnQty, item.product_id]
   );
 }
 
@@ -532,10 +606,8 @@ app.get("/products", async (req, res) => {
         p.*,
         COALESCE(SUM(v.stock), 0) AS variant_stock,
         COUNT(v.id) AS variant_count,
-        CASE
-          WHEN COUNT(v.id) > 0 THEN COALESCE(SUM(v.stock), 0)
-          ELSE p.stock
-        END AS display_stock
+        p.stock AS display_stock,
+        p.stock - COALESCE(SUM(v.stock), 0) AS unallocated_stock
       FROM products p
       LEFT JOIN product_variants v ON v.product_id = p.id
       GROUP BY p.id
@@ -1022,30 +1094,53 @@ app.post("/checkout", async (req, res) => {
       const qty = Number(item.qty || 1);
 
       if (item.variant_id) {
-        const stockResult = await client.query(
-          "SELECT stock, cost FROM product_variants WHERE id = $1 FOR UPDATE",
-          [item.variant_id]
-        );
+  const stockResult = await client.query(
+    `
+    SELECT 
+      v.stock,
+      v.cost,
+      v.product_id,
+      p.stock AS product_stock
+    FROM product_variants v
+    JOIN products p ON p.id = v.product_id
+    WHERE v.id = $1
+    FOR UPDATE
+    `,
+    [item.variant_id]
+  );
 
-        if (stockResult.rows.length === 0) {
-          throw new Error(item.name + " size " + item.size + " not found");
-        }
+  if (stockResult.rows.length === 0) {
+    throw new Error(item.name + " size " + item.size + " not found");
+  }
 
-        const stock = Number(stockResult.rows[0].stock);
+  const variantStock = Number(stockResult.rows[0].stock);
+  const productStock = Number(stockResult.rows[0].product_stock);
+  const productId = stockResult.rows[0].product_id;
 
-        if (stock < qty) {
-          throw new Error(
-            item.name + " size " + item.size + " only has " + stock + " left"
-          );
-        }
+  if (variantStock < qty) {
+    throw new Error(
+      item.name + " size " + item.size + " only has " + variantStock + " left"
+    );
+  }
 
-        await client.query(
-          "UPDATE product_variants SET stock = stock - $1 WHERE id = $2",
-          [qty, item.variant_id]
-        );
+  if (productStock < qty) {
+    throw new Error(
+      item.name + " only has " + productStock + " total stock left"
+    );
+  }
 
-        itemCostMap[item.variant_id] = Number(stockResult.rows[0].cost || 0);
-      } else {
+  await client.query(
+    "UPDATE product_variants SET stock = stock - $1 WHERE id = $2",
+    [qty, item.variant_id]
+  );
+
+  await client.query(
+    "UPDATE products SET stock = stock - $1 WHERE id = $2",
+    [qty, productId]
+  );
+
+  itemCostMap[item.variant_id] = Number(stockResult.rows[0].cost || 0);
+} else {
         const stockResult = await client.query(
           "SELECT stock, cost FROM products WHERE id = $1 FOR UPDATE",
           [item.id]
