@@ -96,6 +96,111 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+
+app.get("/product-sales", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        bi.product_id,
+        bi.variant_id,
+        bi.product_name,
+        bi.size,
+        SUM(bi.qty) AS "soldQty",
+        SUM(COALESCE(bi.returned_qty, 0)) AS "returnedQty",
+        SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) AS "netQty",
+        SUM(bi.price * bi.qty) AS "grossRevenue",
+        SUM(bi.price * COALESCE(bi.returned_qty, 0)) AS "returnedAmount",
+        SUM(
+          bi.price * 
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS "netRevenue",
+        SUM(
+          (bi.price - COALESCE(bi.cost, 0)) *
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS "profit"
+      FROM bill_items bi
+      GROUP BY
+        bi.product_id,
+        bi.variant_id,
+        bi.product_name,
+        bi.size
+      ORDER BY "netQty" DESC
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/cash-flow", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        COALESCE((SELECT SUM(total) FROM bills), 0) AS "netSales",
+        COALESCE((SELECT SUM(subtotal) FROM bills), 0) AS "grossSales",
+        COALESCE((SELECT SUM(discount) FROM bills), 0) AS "manualDiscounts",
+        COALESCE((SELECT SUM(point_discount) FROM bills), 0) AS "pointDiscounts",
+        COALESCE((SELECT SUM(price * qty) FROM returns), 0) AS "returnsAmount",
+
+        COALESCE((
+          SELECT SUM(total)
+          FROM bills
+          WHERE payment_method = 'Cash'
+        ), 0) AS "cashSales",
+
+        COALESCE((
+          SELECT SUM(total)
+          FROM bills
+          WHERE payment_method = 'Card'
+        ), 0) AS "cardSales",
+
+        COALESCE((
+          SELECT SUM(total)
+          FROM bills
+          WHERE payment_method = 'Transfer'
+        ), 0) AS "transferSales",
+
+        COALESCE((
+          SELECT SUM(
+            (price - COALESCE(cost, 0)) *
+            GREATEST(COALESCE(qty, 1) - COALESCE(returned_qty, 0), 0)
+          )
+          FROM bill_items
+        ), 0)
+        -
+        COALESCE((SELECT SUM(discount) FROM bills), 0)
+        -
+        COALESCE((SELECT SUM(point_discount) FROM bills), 0)
+        AS "profit"
+    `);
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/customers", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        id,
+        name,
+        phone,
+        points,
+        total_spent,
+        created_at
+      FROM customers
+      ORDER BY id DESC
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/customer/:phone", async (req, res) => {
   try {
     const phone = req.params.phone;
