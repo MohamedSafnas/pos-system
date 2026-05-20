@@ -777,7 +777,15 @@ app.get("/products", async (req, res) => {
         COALESCE(SUM(v.stock), 0) AS variant_stock,
         COUNT(v.id) AS variant_count,
         p.stock AS display_stock,
-        p.stock - COALESCE(SUM(v.stock), 0) AS unallocated_stock
+        p.stock - COALESCE(SUM(v.stock), 0) AS unallocated_stock,
+        STRING_AGG(
+          CASE 
+            WHEN v.id IS NOT NULL THEN v.size || ': ' || v.stock
+            ELSE NULL
+          END,
+          ', '
+          ORDER BY v.id
+        ) AS size_summary
       FROM products p
       LEFT JOIN product_variants v ON v.product_id = p.id
       GROUP BY p.id
@@ -785,6 +793,39 @@ app.get("/products", async (req, res) => {
     `);
 
     res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.delete("/delete-product/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const usedResult = await db.query(
+      "SELECT id FROM bill_items WHERE product_id = $1 LIMIT 1",
+      [id]
+    );
+
+    if (usedResult.rows.length > 0) {
+      return res.json({
+        error: "Cannot delete this product because it has sales history"
+      });
+    }
+
+    const result = await db.query(
+      "DELETE FROM products WHERE id = $1 RETURNING *",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Product not found" });
+    }
+
+    res.json({
+      message: "Product deleted",
+      product: result.rows[0]
+    });
   } catch (err) {
     res.json({ error: err.message });
   }
@@ -876,7 +917,7 @@ app.post("/add-product", async (req, res) => {
   INSERT INTO products
   (name, gender, category, subcategory, price, stock, cost, cost_code)
   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-  RETURNING id
+  RETURNING *
   `,
       [
         name,
@@ -890,7 +931,8 @@ app.post("/add-product", async (req, res) => {
       ],
     );
 
-    const productId = result.rows[0].id;
+    const product = result.rows[0];
+    const productId = product.id;
 
     const qrData = `product:${productId}`;
 
@@ -901,10 +943,12 @@ app.post("/add-product", async (req, res) => {
 
       res.json({
         message: "Product saved",
+        product,
         productId,
         costCode,
-        qr: qrImage,
+        qr: qrImage
       });
+
     });
   } catch (err) {
     res.json({ error: err.message });
