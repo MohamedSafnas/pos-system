@@ -1472,6 +1472,7 @@ app.post("/checkout", async (req, res) => {
       paymentMethod,
       offlineRef,
       pointsToRedeem,
+      paidAmount
     } = req.body;
 
     await client.query("BEGIN");
@@ -1503,9 +1504,29 @@ app.post("/checkout", async (req, res) => {
       }
     }
 
+    const billTotal = Number(total || 0);
+
+const billPaidAmount =
+  paidAmount === undefined || paidAmount === null || paidAmount === ""
+    ? billTotal
+    : Math.min(Math.max(Number(paidAmount || 0), 0), billTotal);
+
+const billDueAmount = Math.max(billTotal - billPaidAmount, 0);
+
+const dueStatus =
+  billDueAmount > 0
+    ? billPaidAmount > 0
+      ? "partial"
+      : "due"
+    : "paid";
+
+if (billDueAmount > 0 && !customerPhone) {
+  throw new Error("Customer phone is required for due bills");
+}
+
     let customerId = null;
 let redeemPoints = Number(pointsToRedeem || 0);
-let pointsEarned = Math.floor(Number(total || 0) / 100);
+let pointsEarned = Math.floor(Number(billPaidAmount || 0) / 100);
 let customerTotalPoints = 0;
 
 if (redeemPoints > 0 && !customerPhone) {
@@ -1534,44 +1555,49 @@ if (customerPhone) {
     }
 
     const updatedCustomer = await client.query(
-      `
-      UPDATE customers
-      SET name = COALESCE($1, name),
-          points = points - $2 + $3,
-          total_spent = total_spent + $4
-      WHERE phone = $5
-      RETURNING *
-      `,
-      [
-        customerName || null,
-        redeemPoints,
-        pointsEarned,
-        total,
-        customerPhone
-      ]
-    );
+  `
+  UPDATE customers
+  SET name = COALESCE($1, name),
+      points = points - $2 + $3,
+      total_spent = total_spent + $4,
+      total_due = total_due + $5
+  WHERE phone = $6
+  RETURNING *
+  `,
+  [
+    customerName || null,
+    redeemPoints,
+    pointsEarned,
+    billTotal,
+    billDueAmount,
+    customerPhone
+  ]
+);
 
     customerId = updatedCustomer.rows[0].id;
     customerTotalPoints = updatedCustomer.rows[0].points;
   } else {
+
     const customerResult = await client.query(
-      `
-      INSERT INTO customers (name, phone, points, total_spent)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (phone)
-      DO UPDATE SET
-        name = COALESCE(EXCLUDED.name, customers.name),
-        points = customers.points + EXCLUDED.points,
-        total_spent = customers.total_spent + EXCLUDED.total_spent
-      RETURNING *
-      `,
-      [
-        customerName || "Walk-in",
-        customerPhone,
-        pointsEarned,
-        total
-      ]
-    );
+  `
+  INSERT INTO customers (name, phone, points, total_spent, total_due)
+  VALUES ($1, $2, $3, $4, $5)
+  ON CONFLICT (phone)
+  DO UPDATE SET
+    name = COALESCE(EXCLUDED.name, customers.name),
+    points = customers.points + EXCLUDED.points,
+    total_spent = customers.total_spent + EXCLUDED.total_spent,
+    total_due = customers.total_due + EXCLUDED.total_due
+  RETURNING *
+  `,
+  [
+    customerName || "Walk-in",
+    customerPhone,
+    pointsEarned,
+    billTotal,
+    billDueAmount
+  ]
+);
 
     customerId = customerResult.rows[0].id;
     customerTotalPoints = customerResult.rows[0].points;
@@ -1663,36 +1689,42 @@ if (customerPhone) {
     const billResult = await client.query(
   `
   INSERT INTO bills
-  (
-    subtotal,
-    discount,
-    total,
-    customer_name,
-    customer_phone,
-    payment_method,
-    offline_ref,
-    customer_id,
-    points_earned,
-    points_redeemed,
-    point_discount,
-    return_deadline
-  )
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_DATE + INTERVAL '7 days')
-  RETURNING id
+(
+  subtotal,
+  discount,
+  total,
+  customer_name,
+  customer_phone,
+  payment_method,
+  offline_ref,
+  customer_id,
+  points_earned,
+  points_redeemed,
+  point_discount,
+  paid_amount,
+  due_amount,
+  due_status,
+  return_deadline
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_DATE + INTERVAL '7 days')
+RETURNING id
   `,
   [
-    subtotal,
-    discount,
-    total,
-    customerName || null,
-    customerPhone || null,
-    paymentMethod || "Cash",
-    offlineRef || null,
-    customerId,
-    pointsEarned,
-    redeemPoints,
-    redeemPoints
-  ]
+  subtotal,
+  discount,
+  total,
+  customerName || null,
+  customerPhone || null,
+  paymentMethod || "Cash",
+  offlineRef || null,
+  customerId,
+  pointsEarned,
+  redeemPoints,
+  redeemPoints,
+  billPaidAmount,
+  billDueAmount,
+  dueStatus
+]
 );
 
     const billId = billResult.rows[0].id;
@@ -1727,7 +1759,10 @@ if (customerPhone) {
   pointsEarned,
   pointsRedeemed: redeemPoints,
   pointDiscount: redeemPoints,
-  customerTotalPoints
+  customerTotalPoints,
+  paidAmount: billPaidAmount,
+  dueAmount: billDueAmount,
+  dueStatus
 });
 
   } catch (err) {
