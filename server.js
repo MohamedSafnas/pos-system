@@ -873,124 +873,327 @@ app.post("/return-bill-item", async (req, res) => {
   const client = await db.connect();
 
   try {
-    const { billId, billItemId, qty, override } = req.body;
+    const {
+      billId,
+      billItemId,
+      qty,
+      reason,
+      itemCondition,
+      returnType,
+      restock,
+      override,
+      overrideReason
+    } = req.body;
 
-    const blockedItems = ["white dress", "cut pieces"];
+    const returnQty = Number(qty || 0);
+
+    if (!billId || !billItemId || returnQty <= 0) {
+      return res.json({ error: "Bill item and valid return quantity required" });
+    }
 
     await client.query("BEGIN");
 
     const itemResult = await client.query(
       `
-      SELECT 
-  bi.*,
-  b.return_deadline,
-  b.customer_id,
-  b.subtotal,
-  b.points_earned
-FROM bill_items bi
-JOIN bills b ON b.id = bi.bill_id
-WHERE bi.id = $1 AND bi.bill_id = $2
+      SELECT
+        bi.*,
+        b.customer_id,
+        b.discount AS bill_discount,
+        b.point_discount,
+        b.due_amount AS bill_due_amount,
+        b.return_deadline,
+        b.created_at AS bill_date,
+        c.total_due AS customer_total_due,
+        c.points AS customer_points
+      FROM bill_items bi
+      JOIN bills b ON b.id = bi.bill_id
+      LEFT JOIN customers c ON c.id = b.customer_id
+      WHERE bi.id = $1
+        AND bi.bill_id = $2
+      FOR UPDATE
       `,
-      [billItemId, billId],
+      [billItemId, billId]
     );
 
     if (itemResult.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.json({ error: "Bill item not found" });
+      throw new Error("Bill item not found");
     }
 
     const item = itemResult.rows[0];
 
-    if (!override) {
-      const expired =
-        item.return_deadline && new Date(item.return_deadline) < new Date();
+    const soldQty = Number(item.qty || 1);
+    const alreadyReturned = Number(item.returned_qty || 0);
+    const availableQty = soldQty - alreadyReturned;
 
-      if (expired) {
-        await client.query("ROLLBACK");
-        return res.json({ error: "Return period expired" });
+    if (returnQty > availableQty) {
+      throw new Error("Return quantity exceeds available quantity");
+    }
+
+    if (!override && item.return_deadline) {
+      const today = new Date();
+      const deadline = new Date(item.return_deadline);
+
+      if (today > deadline) {
+        throw new Error("Return period expired. Admin override required");
+      }
+    }
+
+    const billLineTotalResult = await client.query(
+      `
+      SELECT
+        COALESCE(
+          SUM(
+            COALESCE(
+              line_total,
+              (price - COALESCE(item_discount, 0)) * COALESCE(qty, 1)
+            )
+          ),
+          0
+        ) AS bill_line_total
+      FROM bill_items
+      WHERE bill_id = $1
+      `,
+      [billId]
+    );
+
+    const billLineTotal = Number(
+      billLineTotalResult.rows[0]?.bill_line_total || 0
+    );
+
+    const price = Number(item.price || 0);
+    const cost = Number(item.cost || 0);
+    const itemDiscount = Number(item.item_discount || 0);
+
+    const itemLineTotal = Number(
+      item.line_total ||
+        (price - itemDiscount) * soldQty
+    );
+
+    const globalDiscount =
+      Number(item.bill_discount || 0) + Number(item.point_discount || 0);
+
+    const itemGlobalDiscountShare =
+      billLineTotal > 0
+        ? (itemLineTotal / billLineTotal) * globalDiscount
+        : 0;
+
+    const itemFinalLineTotal = Math.max(
+      itemLineTotal - itemGlobalDiscountShare,
+      0
+    );
+
+    const returnUnitValue = itemFinalLineTotal / soldQty;
+    let returnAmount = returnUnitValue * returnQty;
+
+    const selectedReturnType = returnType || "cash_refund";
+    const selectedCondition = itemCondition || "good";
+    const shouldRestock = restock === false ? false : true;
+
+    if (selectedReturnType === "no_refund") {
+      returnAmount = 0;
+    }
+
+    let remainingReturnValue = returnAmount;
+    let dueAdjustedAmount = 0;
+    let cashRefundAmount = 0;
+    let storeCreditAmount = 0;
+    let exchangeBalanceAmount = 0;
+
+    const customerId = item.customer_id;
+
+    if (customerId && remainingReturnValue > 0) {
+      const dueBills = await client.query(
+        `
+        SELECT id, due_amount
+        FROM bills
+        WHERE customer_id = $1
+          AND due_amount > 0
+        ORDER BY
+          CASE WHEN id = $2 THEN 0 ELSE 1 END,
+          created_at ASC
+        FOR UPDATE
+        `,
+        [customerId, billId]
+      );
+
+      for (const dueBill of dueBills.rows) {
+        if (remainingReturnValue <= 0) break;
+
+        const billDue = Number(dueBill.due_amount || 0);
+        const applied = Math.min(remainingReturnValue, billDue);
+        const newDue = billDue - applied;
+        const newStatus = newDue <= 0 ? "paid" : "partial";
+
+        await client.query(
+          `
+          UPDATE bills
+          SET due_amount = $1,
+              due_status = $2
+          WHERE id = $3
+          `,
+          [newDue, newStatus, dueBill.id]
+        );
+
+        dueAdjustedAmount += applied;
+        remainingReturnValue -= applied;
       }
 
-      if (blockedItems.includes(item.product_name.toLowerCase())) {
-        await client.query("ROLLBACK");
-        return res.json({ error: "Item not returnable" });
+      if (dueAdjustedAmount > 0) {
+        await client.query(
+          `
+          UPDATE customers
+          SET total_due = GREATEST(total_due - $1, 0)
+          WHERE id = $2
+          `,
+          [dueAdjustedAmount, customerId]
+        );
       }
     }
 
-    const returnQty = Number(qty || 1);
-    const itemQty = Number(item.qty || 1);
-    const returnedQty = Number(item.returned_qty || 0);
-    const remainingQty = itemQty - returnedQty;
+    if (selectedReturnType === "cash_refund") {
+      cashRefundAmount = remainingReturnValue;
+    } else if (selectedReturnType === "store_credit") {
+      storeCreditAmount = remainingReturnValue;
 
-    const returnAmount = Number(item.price || 0) * returnQty;
-
-let pointsDeducted = 0;
-
-if (item.customer_id) {
-  const billSubtotal = Number(item.subtotal || 0);
-  const billPointsEarned = Number(item.points_earned || 0);
-
-  if (billSubtotal > 0 && billPointsEarned > 0) {
-    pointsDeducted = Math.floor(
-      (returnAmount / billSubtotal) * billPointsEarned
-    );
-  } else {
-    pointsDeducted = Math.floor(returnAmount / 100);
-  }
-}
-
-    if (returnQty <= 0 || returnQty > remainingQty) {
-      await client.query("ROLLBACK");
-      return res.json({ error: "Invalid return quantity" });
+      if (customerId && storeCreditAmount > 0) {
+        await client.query(
+          `
+          UPDATE customers
+          SET store_credit = COALESCE(store_credit, 0) + $1
+          WHERE id = $2
+          `,
+          [storeCreditAmount, customerId]
+        );
+      }
+    } else if (selectedReturnType === "exchange") {
+      exchangeBalanceAmount = remainingReturnValue;
+    } else if (selectedReturnType === "due_adjustment") {
+      if (remainingReturnValue > 0) {
+        throw new Error(
+          "Customer due is lower than return value. Choose cash refund, store credit, or exchange"
+        );
+      }
     }
 
-    if (item.variant_id) {
-      await client.query(
-        "UPDATE product_variants SET stock = stock + $1 WHERE id = $2",
-        [returnQty, item.variant_id],
-      );
+    const pointsToRemove = Math.floor(
+      Number(
+        cashRefundAmount + storeCreditAmount + exchangeBalanceAmount
+      ) / 100
+    );
 
+    if (customerId && pointsToRemove > 0) {
       await client.query(
-        "UPDATE products SET stock = stock + $1 WHERE id = $2",
-        [returnQty, item.product_id],
-      );
-    } else if (item.product_id) {
-      await client.query(
-        "UPDATE products SET stock = stock + $1 WHERE id = $2",
-        [returnQty, item.product_id],
+        `
+        UPDATE customers
+        SET points = GREATEST(points - $1, 0)
+        WHERE id = $2
+        `,
+        [pointsToRemove, customerId]
       );
     }
-
-    await client.query(
-      "UPDATE bill_items SET returned_qty = returned_qty + $1 WHERE id = $2",
-      [returnQty, billItemId],
-    );
 
     await client.query(
       `
+      UPDATE bill_items
+      SET returned_qty = COALESCE(returned_qty, 0) + $1
+      WHERE id = $2
+      `,
+      [returnQty, billItemId]
+    );
+
+    if (shouldRestock && selectedCondition === "good") {
+      if (item.variant_id) {
+        await client.query(
+          `
+          UPDATE product_variants
+          SET stock = stock + $1
+          WHERE id = $2
+          `,
+          [returnQty, item.variant_id]
+        );
+      }
+
+      if (item.product_id) {
+        await client.query(
+          `
+          UPDATE products
+          SET stock = stock + $1
+          WHERE id = $2
+          `,
+          [returnQty, item.product_id]
+        );
+      }
+    }
+
+    const returnRecord = await client.query(
+      `
       INSERT INTO returns
-(bill_id, bill_item_id, product_id, variant_id, size, product_name, price, qty, override_used, points_deducted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      (
+        bill_id,
+        bill_item_id,
+        product_id,
+        variant_id,
+        product_name,
+        size,
+        qty,
+        price,
+        cost,
+        item_discount,
+        return_amount,
+        due_adjusted_amount,
+        cash_refund_amount,
+        store_credit_amount,
+        exchange_balance_amount,
+        return_type,
+        reason,
+        item_condition,
+        restocked,
+        admin_override,
+        override_reason
+      )
+      VALUES
+      ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+       $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+      RETURNING *
       `,
       [
-  billId,
-  billItemId,
-  item.product_id,
-  item.variant_id || null,
-  item.size || null,
-  item.product_name,
-  item.price,
-  returnQty,
-  override || false,
-  pointsDeducted
-],
+        billId,
+        billItemId,
+        item.product_id || null,
+        item.variant_id || null,
+        item.product_name,
+        item.size || null,
+        returnQty,
+        price,
+        cost,
+        itemDiscount,
+        returnAmount,
+        dueAdjustedAmount,
+        cashRefundAmount,
+        storeCreditAmount,
+        exchangeBalanceAmount,
+        selectedReturnType,
+        reason || null,
+        selectedCondition,
+        shouldRestock && selectedCondition === "good",
+        override ? true : false,
+        overrideReason || null
+      ]
     );
 
     await client.query("COMMIT");
 
     res.json({
-  message: "Item returned successfully",
-  pointsDeducted
-});
+      message: "Return processed successfully",
+      return: returnRecord.rows[0],
+      returnAmount,
+      dueAdjustedAmount,
+      cashRefundAmount,
+      storeCreditAmount,
+      exchangeBalanceAmount,
+      pointsRemoved: pointsToRemove,
+      restocked: shouldRestock && selectedCondition === "good"
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
@@ -1276,14 +1479,41 @@ app.post("/save-bill", async (req, res) => {
     const billId = billResult.rows[0].id;
 
     for (const item of items) {
-      await db.query(
-        `
-        INSERT INTO bill_items
-        (bill_id, product_id, product_name, price, qty)
-        VALUES ($1, $2, $3, $4, $5)
-        `,
-        [billId, item.id, item.name, item.price, item.qty],
-      );
+      await client.query(
+  `
+  INSERT INTO bill_items
+  (
+    bill_id,
+    product_id,
+    variant_id,
+    product_name,
+    size,
+    qty,
+    price,
+    cost,
+    item_discount,
+    line_subtotal,
+    line_total
+  )
+  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+  `,
+  [
+    billId,
+    item.product_id || item.id,
+    item.variant_id || null,
+    item.name,
+    item.size || null,
+    item.qty || 1,
+    item.price,
+    item.cost || 0,
+    item.itemDiscount || 0,
+    item.lineSubtotal ||
+      Number(item.price || 0) * Number(item.qty || 1),
+    item.lineTotal ||
+      (Number(item.price || 0) - Number(item.itemDiscount || 0)) *
+        Number(item.qty || 1)
+  ]
+);
     }
 
     res.json({
