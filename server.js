@@ -100,37 +100,69 @@ app.get("/", (req, res) => {
 app.get("/product-sales", async (req, res) => {
   try {
     const result = await db.query(`
+      WITH variant_sales AS (
+        SELECT
+          bi.product_id,
+          bi.variant_id,
+          COALESCE(p.name, bi.product_name) AS product_name,
+          COALESCE(p.gender, '') AS gender,
+          COALESCE(p.category, '') AS category,
+          COALESCE(p.subcategory, '') AS subcategory,
+          bi.size,
+          SUM(COALESCE(bi.qty, 1)) AS sold_qty,
+          SUM(COALESCE(bi.returned_qty, 0)) AS returned_qty,
+          SUM(COALESCE(bi.qty, 1)) - SUM(COALESCE(bi.returned_qty, 0)) AS net_qty,
+          SUM(bi.price * COALESCE(bi.qty, 1)) AS gross_revenue,
+          SUM(bi.price * COALESCE(bi.returned_qty, 0)) AS returned_amount,
+          SUM(
+            bi.price *
+            GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+          ) AS net_revenue,
+          SUM(
+            (bi.price - COALESCE(bi.cost, 0)) *
+            GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+          ) AS profit
+        FROM bill_items bi
+        LEFT JOIN products p ON p.id = bi.product_id
+        GROUP BY
+          bi.product_id,
+          bi.variant_id,
+          p.name,
+          bi.product_name,
+          p.gender,
+          p.category,
+          p.subcategory,
+          bi.size
+      )
+
       SELECT
-        bi.product_id,
-        bi.variant_id,
-        bi.product_name,
-        bi.size,
-        p.gender,
-        p.category,
-        p.subcategory,
-        SUM(bi.qty) AS "soldQty",
-        SUM(COALESCE(bi.returned_qty, 0)) AS "returnedQty",
-        SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) AS "netQty",
-        SUM(bi.price * bi.qty) AS "grossRevenue",
-        SUM(bi.price * COALESCE(bi.returned_qty, 0)) AS "returnedAmount",
-        SUM(
-          bi.price *
-          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
-        ) AS "netRevenue",
-        SUM(
-          (bi.price - COALESCE(bi.cost, 0)) *
-          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
-        ) AS "profit"
-      FROM bill_items bi
-      LEFT JOIN products p ON p.id = bi.product_id
+        product_id,
+        product_name,
+        gender,
+        category,
+        subcategory,
+        SUM(sold_qty) AS "soldQty",
+        SUM(returned_qty) AS "returnedQty",
+        SUM(net_qty) AS "netQty",
+        SUM(gross_revenue) AS "grossRevenue",
+        SUM(returned_amount) AS "returnedAmount",
+        SUM(net_revenue) AS "netRevenue",
+        SUM(profit) AS "profit",
+        STRING_AGG(
+          CASE
+            WHEN size IS NOT NULL THEN size || ': ' || net_qty
+            ELSE NULL
+          END,
+          ', '
+          ORDER BY size
+        ) AS "sizeSummary"
+      FROM variant_sales
       GROUP BY
-        bi.product_id,
-        bi.variant_id,
-        bi.product_name,
-        bi.size,
-        p.gender,
-        p.category,
-        p.subcategory
+        product_id,
+        product_name,
+        gender,
+        category,
+        subcategory
       ORDER BY "netQty" DESC
     `);
 
