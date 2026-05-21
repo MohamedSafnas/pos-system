@@ -105,13 +105,16 @@ app.get("/product-sales", async (req, res) => {
         bi.variant_id,
         bi.product_name,
         bi.size,
+        p.gender,
+        p.category,
+        p.subcategory,
         SUM(bi.qty) AS "soldQty",
         SUM(COALESCE(bi.returned_qty, 0)) AS "returnedQty",
         SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) AS "netQty",
         SUM(bi.price * bi.qty) AS "grossRevenue",
         SUM(bi.price * COALESCE(bi.returned_qty, 0)) AS "returnedAmount",
         SUM(
-          bi.price * 
+          bi.price *
           GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
         ) AS "netRevenue",
         SUM(
@@ -119,11 +122,15 @@ app.get("/product-sales", async (req, res) => {
           GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
         ) AS "profit"
       FROM bill_items bi
+      LEFT JOIN products p ON p.id = bi.product_id
       GROUP BY
         bi.product_id,
         bi.variant_id,
         bi.product_name,
-        bi.size
+        bi.size,
+        p.gender,
+        p.category,
+        p.subcategory
       ORDER BY "netQty" DESC
     `);
 
