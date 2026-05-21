@@ -97,6 +97,164 @@ app.get("/", (req, res) => {
 });
 
 
+app.get("/sales-chart", async (req, res) => {
+  try {
+    const mode = req.query.mode || "month";
+    const customDate = req.query.date;
+    const customStart = req.query.start;
+    const customEnd = req.query.end;
+
+    const now = new Date();
+
+    const startOfDay = (date) => {
+      const d = new Date(date);
+      d.setHours(0, 0, 0, 0);
+      return d;
+    };
+
+    const addDays = (date, days) => {
+      const d = new Date(date);
+      d.setDate(d.getDate() + days);
+      return d;
+    };
+
+    let startDate;
+    let endDate;
+    let bucket = "day";
+    let interval = "1 day";
+
+    if (mode === "day") {
+      startDate = startOfDay(now);
+      endDate = addDays(startDate, 1);
+      bucket = "hour";
+      interval = "1 hour";
+    } else if (mode === "week") {
+      const d = startOfDay(now);
+      const day = d.getDay();
+      const diffToMonday = day === 0 ? -6 : 1 - day;
+      startDate = addDays(d, diffToMonday);
+      endDate = addDays(startDate, 7);
+      bucket = "day";
+      interval = "1 day";
+    } else if (mode === "month") {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      endDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      bucket = "day";
+      interval = "1 day";
+    } else if (mode === "year") {
+      startDate = new Date(now.getFullYear(), 0, 1);
+      endDate = new Date(now.getFullYear() + 1, 0, 1);
+      bucket = "month";
+      interval = "1 month";
+    } else if (mode === "custom_day") {
+      startDate = startOfDay(customDate || now);
+      endDate = addDays(startDate, 1);
+      bucket = "hour";
+      interval = "1 hour";
+    } else if (mode === "custom_range") {
+      startDate = startOfDay(customStart || now);
+      endDate = addDays(startOfDay(customEnd || customStart || now), 1);
+      bucket = "day";
+      interval = "1 day";
+    } else {
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+      endDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      bucket = "day";
+      interval = "1 day";
+    }
+
+    const result = await db.query(
+      `
+      WITH periods AS (
+        SELECT generate_series(
+          date_trunc($3, $1::timestamp),
+          date_trunc($3, ($2::timestamp - INTERVAL '1 second')),
+          $4::interval
+        ) AS bucket
+      ),
+
+      bill_summary AS (
+        SELECT
+          date_trunc($3, created_at) AS bucket,
+          COUNT(*) AS total_bills,
+          COALESCE(SUM(subtotal), 0) AS gross_sales,
+          COALESCE(SUM(total), 0) AS bill_sales,
+          COALESCE(SUM(discount), 0) AS manual_discounts,
+          COALESCE(SUM(point_discount), 0) AS point_discounts
+        FROM bills
+        WHERE created_at >= $1
+          AND created_at < $2
+        GROUP BY 1
+      ),
+
+      return_summary AS (
+        SELECT
+          date_trunc($3, COALESCE(r.created_at, b.created_at)) AS bucket,
+          COALESCE(SUM(r.price * r.qty), 0) AS returns_amount
+        FROM returns r
+        LEFT JOIN bills b ON b.id = r.bill_id
+        WHERE COALESCE(r.created_at, b.created_at) >= $1
+          AND COALESCE(r.created_at, b.created_at) < $2
+        GROUP BY 1
+      ),
+
+      profit_summary AS (
+        SELECT
+          date_trunc($3, b.created_at) AS bucket,
+          COALESCE(SUM(
+            (bi.price - COALESCE(bi.cost, 0)) *
+            GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+          ), 0) AS item_profit
+        FROM bill_items bi
+        JOIN bills b ON b.id = bi.bill_id
+        WHERE b.created_at >= $1
+          AND b.created_at < $2
+        GROUP BY 1
+      )
+
+      SELECT
+        p.bucket,
+        CASE
+          WHEN $3 = 'hour' THEN TO_CHAR(p.bucket, 'HH24:00')
+          WHEN $3 = 'month' THEN TO_CHAR(p.bucket, 'Mon YYYY')
+          ELSE TO_CHAR(p.bucket, 'YYYY-MM-DD')
+        END AS label,
+
+        COALESCE(bs.total_bills, 0) AS "totalBills",
+        COALESCE(bs.gross_sales, 0) AS "grossSales",
+        GREATEST(
+          COALESCE(bs.bill_sales, 0) - COALESCE(rs.returns_amount, 0),
+          0
+        ) AS "netSales",
+        COALESCE(rs.returns_amount, 0) AS "returnsAmount",
+        COALESCE(bs.manual_discounts, 0) AS "manualDiscounts",
+        COALESCE(bs.point_discounts, 0) AS "pointDiscounts",
+        (
+          COALESCE(ps.item_profit, 0)
+          - COALESCE(bs.manual_discounts, 0)
+          - COALESCE(bs.point_discounts, 0)
+        ) AS "profit"
+      FROM periods p
+      LEFT JOIN bill_summary bs ON bs.bucket = p.bucket
+      LEFT JOIN return_summary rs ON rs.bucket = p.bucket
+      LEFT JOIN profit_summary ps ON ps.bucket = p.bucket
+      ORDER BY p.bucket ASC
+      `,
+      [startDate, endDate, bucket, interval]
+    );
+
+    res.json({
+      mode,
+      startDate,
+      endDate,
+      bucket,
+      data: result.rows
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/product-sales", async (req, res) => {
   try {
     const result = await db.query(`
