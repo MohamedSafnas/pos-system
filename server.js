@@ -1061,17 +1061,6 @@ app.post("/return-bill-item", async (req, res) => {
         dueAdjustedAmount += applied;
         remainingReturnValue -= applied;
       }
-
-      if (dueAdjustedAmount > 0) {
-        await client.query(
-          `
-          UPDATE customers
-          SET total_due = GREATEST(total_due - $1, 0)
-          WHERE id = $2
-          `,
-          [dueAdjustedAmount, customerId],
-        );
-      }
     }
 
     if (selectedReturnType === "cash_refund") {
@@ -1103,21 +1092,28 @@ app.post("/return-bill-item", async (req, res) => {
       }
     }
 
-    const pointsToRemove = Math.floor(
-      Number(cashRefundAmount + storeCreditAmount + exchangeBalanceAmount) /
-        100,
-    );
+    const pointsToRemove = customerId
+  ? Math.floor(Number(returnAmount || 0) / 100)
+  : 0;
 
-    if (customerId && pointsToRemove > 0) {
-      await client.query(
-        `
-        UPDATE customers
-        SET points = GREATEST(points - $1, 0)
-        WHERE id = $2
-        `,
-        [pointsToRemove, customerId],
-      );
-    }
+if (customerId) {
+  await client.query(
+    `
+    UPDATE customers
+    SET
+      total_due = GREATEST(COALESCE(total_due, 0) - $1, 0),
+      total_spent = GREATEST(COALESCE(total_spent, 0) - $2, 0),
+      points = GREATEST(COALESCE(points, 0) - $3, 0)
+    WHERE id = $4
+    `,
+    [
+      dueAdjustedAmount,
+      returnAmount,
+      pointsToRemove,
+      customerId
+    ]
+  );
+}
 
     await client.query(
       `
@@ -1127,6 +1123,22 @@ app.post("/return-bill-item", async (req, res) => {
       `,
       [returnQty, billItemId],
     );
+
+    await client.query(
+  `
+  UPDATE bills
+  SET
+    returned_amount = COALESCE(returned_amount, 0) + $1,
+    net_total = GREATEST(total - (COALESCE(returned_amount, 0) + $1), 0),
+    due_status = CASE
+      WHEN COALESCE(due_amount, 0) <= 0 THEN 'paid'
+      WHEN COALESCE(paid_amount, 0) > 0 THEN 'partial'
+      ELSE 'due'
+    END
+  WHERE id = $2
+  `,
+  [returnAmount, billId]
+);
 
     if (shouldRestock && selectedCondition === "good") {
       if (item.variant_id) {
@@ -2190,16 +2202,18 @@ app.post("/pay-due", async (req, res) => {
     let remainingPayment = payAmount;
 
     const dueBills = await client.query(
-      `
-      SELECT id, due_amount
-      FROM bills
-      WHERE customer_id = $1
-        AND due_amount > 0
-      ORDER BY created_at ASC
-      FOR UPDATE
-      `,
-      [customerId],
-    );
+  `
+  SELECT id, due_amount
+  FROM bills
+  WHERE (customer_id = $1 OR customer_phone = $3)
+    AND due_amount > 0
+  ORDER BY
+    CASE WHEN id = $2 THEN 0 ELSE 1 END,
+    created_at ASC
+  FOR UPDATE
+  `,
+  [customerId, billId, customerPhone || ""]
+);
 
     for (const bill of dueBills.rows) {
       if (remainingPayment <= 0) break;
