@@ -387,6 +387,7 @@ app.get("/customers", async (req, res) => {
         phone,
         points,
         total_spent,
+        total_due,
         created_at
       FROM customers
       ORDER BY id DESC
