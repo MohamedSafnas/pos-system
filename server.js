@@ -1875,6 +1875,116 @@ app.get("/product-insights", async (req, res) => {
   }
 });
 
+app.post("/pay-due", async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    const { customerId, amount, paymentMethod, note } = req.body;
+
+    const payAmount = Number(amount || 0);
+
+    if (!customerId || payAmount <= 0) {
+      return res.json({ error: "Customer and valid amount required" });
+    }
+
+    await client.query("BEGIN");
+
+    const customerResult = await client.query(
+      "SELECT * FROM customers WHERE id = $1 FOR UPDATE",
+      [customerId]
+    );
+
+    if (customerResult.rows.length === 0) {
+      throw new Error("Customer not found");
+    }
+
+    const customer = customerResult.rows[0];
+    const totalDue = Number(customer.total_due || 0);
+
+    if (payAmount > totalDue) {
+      throw new Error("Payment cannot exceed customer due amount");
+    }
+
+    let remainingPayment = payAmount;
+
+    const dueBills = await client.query(
+      `
+      SELECT id, due_amount
+      FROM bills
+      WHERE customer_id = $1
+        AND due_amount > 0
+      ORDER BY created_at ASC
+      FOR UPDATE
+      `,
+      [customerId]
+    );
+
+    for (const bill of dueBills.rows) {
+      if (remainingPayment <= 0) break;
+
+      const billDue = Number(bill.due_amount || 0);
+      const applied = Math.min(remainingPayment, billDue);
+      const newDue = billDue - applied;
+      const newStatus = newDue <= 0 ? "paid" : "partial";
+
+      await client.query(
+        `
+        UPDATE bills
+        SET paid_amount = paid_amount + $1,
+            due_amount = $2,
+            due_status = $3
+        WHERE id = $4
+        `,
+        [applied, newDue, newStatus, bill.id]
+      );
+
+      await client.query(
+        `
+        INSERT INTO due_payments
+        (customer_id, bill_id, amount, payment_method, note)
+        VALUES ($1, $2, $3, $4, $5)
+        `,
+        [
+          customerId,
+          bill.id,
+          applied,
+          paymentMethod || "Cash",
+          note || null
+        ]
+      );
+
+      remainingPayment -= applied;
+    }
+
+    const pointsEarned = Math.floor(payAmount / 100);
+
+    const updatedCustomer = await client.query(
+      `
+      UPDATE customers
+      SET total_due = total_due - $1,
+          points = points + $2
+      WHERE id = $3
+      RETURNING *
+      `,
+      [payAmount, pointsEarned, customerId]
+    );
+
+    await client.query("COMMIT");
+
+    res.json({
+      message: "Due payment saved",
+      customer: updatedCustomer.rows[0],
+      paidAmount: payAmount,
+      pointsEarned
+    });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
