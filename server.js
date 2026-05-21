@@ -1541,6 +1541,108 @@ if (customerPhone) {
   }
 });
 
+app.get("/product-insights", async (req, res) => {
+  try {
+    const categorySales = await db.query(`
+      SELECT
+        COALESCE(p.gender, '-') AS gender,
+        COALESCE(p.category, '-') AS category,
+        COALESCE(p.subcategory, '-') AS subcategory,
+        SUM(bi.qty) AS sold_qty,
+        SUM(COALESCE(bi.returned_qty, 0)) AS returned_qty,
+        SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) AS net_qty,
+        SUM(
+          bi.price *
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS net_revenue,
+        SUM(
+          (bi.price - COALESCE(bi.cost, 0)) *
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS profit
+      FROM bill_items bi
+      LEFT JOIN products p ON p.id = bi.product_id
+      GROUP BY p.gender, p.category, p.subcategory
+      ORDER BY net_qty DESC
+    `);
+
+    const trending = await db.query(`
+      SELECT
+        p.id AS product_id,
+        p.name,
+        p.gender,
+        p.category,
+        p.subcategory,
+        p.stock,
+        SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) AS net_qty,
+        SUM(
+          bi.price *
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS net_revenue,
+        SUM(
+          (bi.price - COALESCE(bi.cost, 0)) *
+          GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
+        ) AS profit
+      FROM bill_items bi
+      JOIN bills b ON b.id = bi.bill_id
+      LEFT JOIN products p ON p.id = bi.product_id
+      WHERE b.created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY p.id, p.name, p.gender, p.category, p.subcategory, p.stock
+      HAVING SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)) > 0
+      ORDER BY net_qty DESC, net_revenue DESC
+      LIMIT 10
+    `);
+
+    const slowSelling = await db.query(`
+      SELECT
+        p.id AS product_id,
+        p.name,
+        p.gender,
+        p.category,
+        p.subcategory,
+        p.stock,
+        COALESCE(SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)), 0) AS net_qty,
+        MAX(b.created_at) AS last_sold_at
+      FROM products p
+      LEFT JOIN bill_items bi ON bi.product_id = p.id
+      LEFT JOIN bills b ON b.id = bi.bill_id
+      WHERE p.stock > 0
+      GROUP BY p.id, p.name, p.gender, p.category, p.subcategory, p.stock
+      HAVING COALESCE(SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)), 0) <= 2
+      ORDER BY net_qty ASC, p.stock DESC
+      LIMIT 15
+    `);
+
+    const oldStock = await db.query(`
+      SELECT
+        p.id AS product_id,
+        p.name,
+        p.gender,
+        p.category,
+        p.subcategory,
+        p.stock,
+        p.created_at,
+        EXTRACT(DAY FROM NOW() - p.created_at) AS stock_age_days,
+        COALESCE(SUM(bi.qty) - SUM(COALESCE(bi.returned_qty, 0)), 0) AS net_qty
+      FROM products p
+      LEFT JOIN bill_items bi ON bi.product_id = p.id
+      WHERE p.stock > 0
+      GROUP BY p.id, p.name, p.gender, p.category, p.subcategory, p.stock, p.created_at
+      HAVING EXTRACT(DAY FROM NOW() - p.created_at) >= 60
+      ORDER BY stock_age_days DESC, p.stock DESC
+      LIMIT 15
+    `);
+
+    res.json({
+      categorySales: categorySales.rows,
+      trending: trending.rows,
+      slowSelling: slowSelling.rows,
+      oldStock: oldStock.rows
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
