@@ -97,6 +97,38 @@ app.get("/", (req, res) => {
 });
 
 
+app.get("/customer/:id/purchases", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        created_at,
+        subtotal,
+        discount,
+        total,
+        payment_method,
+        points_earned,
+        points_redeemed,
+        point_discount,
+        paid_amount,
+        due_amount,
+        due_status
+      FROM bills
+      WHERE customer_id = $1
+      ORDER BY created_at DESC
+      `,
+      [customerId]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/sales-chart", async (req, res) => {
   try {
     const mode = req.query.mode || "month";
