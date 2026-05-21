@@ -894,26 +894,23 @@ app.post("/return-bill-item", async (req, res) => {
     await client.query("BEGIN");
 
     const itemResult = await client.query(
-      `
-      SELECT
-        bi.*,
-        b.customer_id,
-        b.discount AS bill_discount,
-        b.point_discount,
-        b.due_amount AS bill_due_amount,
-        b.return_deadline,
-        b.created_at AS bill_date,
-        c.total_due AS customer_total_due,
-        c.points AS customer_points
-      FROM bill_items bi
-      JOIN bills b ON b.id = bi.bill_id
-      LEFT JOIN customers c ON c.id = b.customer_id
-      WHERE bi.id = $1
-        AND bi.bill_id = $2
-      FOR UPDATE
-      `,
-      [billItemId, billId]
-    );
+  `
+  SELECT
+    bi.*,
+    b.customer_id,
+    b.discount AS bill_discount,
+    b.point_discount,
+    b.due_amount AS bill_due_amount,
+    b.return_deadline,
+    b.created_at AS bill_date
+  FROM bill_items bi
+  JOIN bills b ON b.id = bi.bill_id
+  WHERE bi.id = $1
+    AND bi.bill_id = $2
+  FOR UPDATE OF bi, b
+  `,
+  [billItemId, billId]
+);
 
     if (itemResult.rows.length === 0) {
       throw new Error("Bill item not found");
@@ -1000,6 +997,18 @@ app.post("/return-bill-item", async (req, res) => {
     let exchangeBalanceAmount = 0;
 
     const customerId = item.customer_id;
+
+    if (customerId) {
+  await client.query(
+    `
+    SELECT id, total_due, points
+    FROM customers
+    WHERE id = $1
+    FOR UPDATE
+    `,
+    [customerId]
+  );
+}
 
     if (customerId && remainingReturnValue > 0) {
       const dueBills = await client.query(
