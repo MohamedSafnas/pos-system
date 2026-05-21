@@ -997,10 +997,11 @@ app.post("/return-bill-item", async (req, res) => {
     let exchangeBalanceAmount = 0;
 
     let customerId = item.customer_id;
-    const customerPhone = item.customer_phone;
+    const customerPhone = item.customer_phone || "";
+    let customerFound = false;
 
     if (customerId) {
-      await client.query(
+      const customerLock = await client.query(
         `
     SELECT id, total_due, points
     FROM customers
@@ -1009,12 +1010,19 @@ app.post("/return-bill-item", async (req, res) => {
     `,
         [customerId],
       );
-    } else if (customerPhone) {
+
+      if (customerLock.rows.length > 0) {
+        customerFound = true;
+      }
+    }
+
+    if (!customerFound && customerPhone) {
       const customerByPhone = await client.query(
         `
     SELECT id, total_due, points
     FROM customers
-    WHERE phone = $1
+    WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')
+        = regexp_replace($1, '[^0-9]', '', 'g')
     FOR UPDATE
     `,
         [customerPhone],
@@ -1022,22 +1030,31 @@ app.post("/return-bill-item", async (req, res) => {
 
       if (customerByPhone.rows.length > 0) {
         customerId = customerByPhone.rows[0].id;
+        customerFound = true;
       }
     }
 
-    if (adjustDueFirst !== false && customerId && remainingReturnValue > 0) {
+    if (
+      adjustDueFirst !== false &&
+      remainingReturnValue > 0 &&
+      (customerId || customerPhone)
+    ) {
       const dueBills = await client.query(
         `
-        SELECT id, due_amount
-        FROM bills
-        WHERE (customer_id = $1 OR customer_phone = $3)
-  AND due_amount > 0
-        ORDER BY
-          CASE WHEN id = $2 THEN 0 ELSE 1 END,
-          created_at ASC
-        FOR UPDATE
-        `,
-        [customerId, billId, customerPhone || ""],
+    SELECT id, due_amount
+    FROM bills
+    WHERE (
+      ($1::bigint IS NOT NULL AND customer_id = $1)
+      OR regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')
+         = regexp_replace($3, '[^0-9]', '', 'g')
+    )
+      AND due_amount > 0
+    ORDER BY
+      CASE WHEN id = $2 THEN 0 ELSE 1 END,
+      created_at ASC
+    FOR UPDATE
+    `,
+        [customerId || null, billId, customerPhone || ""],
       );
 
       for (const dueBill of dueBills.rows) {
@@ -1093,12 +1110,12 @@ app.post("/return-bill-item", async (req, res) => {
     }
 
     const pointsToRemove = customerId
-  ? Math.floor(Number(returnAmount || 0) / 100)
-  : 0;
+      ? Math.floor(Number(returnAmount || 0) / 100)
+      : 0;
 
-if (customerId) {
-  await client.query(
-    `
+    if (customerId) {
+      await client.query(
+        `
     UPDATE customers
     SET
       total_due = GREATEST(COALESCE(total_due, 0) - $1, 0),
@@ -1106,14 +1123,9 @@ if (customerId) {
       points = GREATEST(COALESCE(points, 0) - $3, 0)
     WHERE id = $4
     `,
-    [
-      dueAdjustedAmount,
-      returnAmount,
-      pointsToRemove,
-      customerId
-    ]
-  );
-}
+        [dueAdjustedAmount, returnAmount, pointsToRemove, customerId],
+      );
+    }
 
     await client.query(
       `
@@ -1125,7 +1137,7 @@ if (customerId) {
     );
 
     await client.query(
-  `
+      `
   UPDATE bills
   SET
     returned_amount = COALESCE(returned_amount, 0) + $1,
@@ -1137,8 +1149,8 @@ if (customerId) {
     END
   WHERE id = $2
   `,
-  [returnAmount, billId]
-);
+      [returnAmount, billId],
+    );
 
     if (shouldRestock && selectedCondition === "good") {
       if (item.variant_id) {
@@ -1232,6 +1244,10 @@ if (customerId) {
       exchangeBalanceAmount,
       pointsRemoved: pointsToRemove,
       restocked: shouldRestock && selectedCondition === "good",
+
+      customerId,
+      customerPhone,
+      adjustDueFirst,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -2202,7 +2218,7 @@ app.post("/pay-due", async (req, res) => {
     let remainingPayment = payAmount;
 
     const dueBills = await client.query(
-  `
+      `
   SELECT id, due_amount
   FROM bills
   WHERE (customer_id = $1 OR customer_phone = $3)
@@ -2212,8 +2228,8 @@ app.post("/pay-due", async (req, res) => {
     created_at ASC
   FOR UPDATE
   `,
-  [customerId, billId, customerPhone || ""]
-);
+      [customerId, billId, customerPhone || ""],
+    );
 
     for (const bill of dueBills.rows) {
       if (remainingPayment <= 0) break;
