@@ -96,7 +96,6 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
-
 app.get("/customer/:id/purchases", async (req, res) => {
   try {
     const customerId = req.params.id;
@@ -120,7 +119,7 @@ app.get("/customer/:id/purchases", async (req, res) => {
       WHERE customer_id = $1
       ORDER BY created_at DESC
       `,
-      [customerId]
+      [customerId],
     );
 
     res.json(result.rows);
@@ -272,7 +271,7 @@ app.get("/sales-chart", async (req, res) => {
       LEFT JOIN profit_summary ps ON ps.bucket = p.bucket
       ORDER BY p.bucket ASC
       `,
-      [startDate, endDate, bucket, interval]
+      [startDate, endDate, bucket, interval],
     );
 
     res.json({
@@ -280,7 +279,7 @@ app.get("/sales-chart", async (req, res) => {
       startDate,
       endDate,
       bucket,
-      data: result.rows
+      data: result.rows,
     });
   } catch (err) {
     res.json({ error: err.message });
@@ -882,22 +881,26 @@ app.post("/return-bill-item", async (req, res) => {
       returnType,
       restock,
       override,
-      overrideReason
+      overrideReason,
+      adjustDueFirst,
     } = req.body;
 
     const returnQty = Number(qty || 0);
 
     if (!billId || !billItemId || returnQty <= 0) {
-      return res.json({ error: "Bill item and valid return quantity required" });
+      return res.json({
+        error: "Bill item and valid return quantity required",
+      });
     }
 
     await client.query("BEGIN");
 
     const itemResult = await client.query(
-  `
+      `
   SELECT
     bi.*,
     b.customer_id,
+    b.customer_phone,
     b.discount AS bill_discount,
     b.point_discount,
     b.due_amount AS bill_due_amount,
@@ -909,8 +912,8 @@ app.post("/return-bill-item", async (req, res) => {
     AND bi.bill_id = $2
   FOR UPDATE OF bi, b
   `,
-  [billItemId, billId]
-);
+      [billItemId, billId],
+    );
 
     if (itemResult.rows.length === 0) {
       throw new Error("Bill item not found");
@@ -950,11 +953,11 @@ app.post("/return-bill-item", async (req, res) => {
       FROM bill_items
       WHERE bill_id = $1
       `,
-      [billId]
+      [billId],
     );
 
     const billLineTotal = Number(
-      billLineTotalResult.rows[0]?.bill_line_total || 0
+      billLineTotalResult.rows[0]?.bill_line_total || 0,
     );
 
     const price = Number(item.price || 0);
@@ -962,21 +965,18 @@ app.post("/return-bill-item", async (req, res) => {
     const itemDiscount = Number(item.item_discount || 0);
 
     const itemLineTotal = Number(
-      item.line_total ||
-        (price - itemDiscount) * soldQty
+      item.line_total || (price - itemDiscount) * soldQty,
     );
 
     const globalDiscount =
       Number(item.bill_discount || 0) + Number(item.point_discount || 0);
 
     const itemGlobalDiscountShare =
-      billLineTotal > 0
-        ? (itemLineTotal / billLineTotal) * globalDiscount
-        : 0;
+      billLineTotal > 0 ? (itemLineTotal / billLineTotal) * globalDiscount : 0;
 
     const itemFinalLineTotal = Math.max(
       itemLineTotal - itemGlobalDiscountShare,
-      0
+      0,
     );
 
     const returnUnitValue = itemFinalLineTotal / soldQty;
@@ -996,33 +996,48 @@ app.post("/return-bill-item", async (req, res) => {
     let storeCreditAmount = 0;
     let exchangeBalanceAmount = 0;
 
-    const customerId = item.customer_id;
+    let customerId = item.customer_id;
+    const customerPhone = item.customer_phone;
 
     if (customerId) {
-  await client.query(
-    `
+      await client.query(
+        `
     SELECT id, total_due, points
     FROM customers
     WHERE id = $1
     FOR UPDATE
     `,
-    [customerId]
-  );
-}
+        [customerId],
+      );
+    } else if (customerPhone) {
+      const customerByPhone = await client.query(
+        `
+    SELECT id, total_due, points
+    FROM customers
+    WHERE phone = $1
+    FOR UPDATE
+    `,
+        [customerPhone],
+      );
 
-    if (customerId && remainingReturnValue > 0) {
+      if (customerByPhone.rows.length > 0) {
+        customerId = customerByPhone.rows[0].id;
+      }
+    }
+
+    if (adjustDueFirst !== false && customerId && remainingReturnValue > 0) {
       const dueBills = await client.query(
         `
         SELECT id, due_amount
         FROM bills
-        WHERE customer_id = $1
-          AND due_amount > 0
+        WHERE (customer_id = $1 OR customer_phone = $3)
+  AND due_amount > 0
         ORDER BY
           CASE WHEN id = $2 THEN 0 ELSE 1 END,
           created_at ASC
         FOR UPDATE
         `,
-        [customerId, billId]
+        [customerId, billId, customerPhone || ""],
       );
 
       for (const dueBill of dueBills.rows) {
@@ -1040,7 +1055,7 @@ app.post("/return-bill-item", async (req, res) => {
               due_status = $2
           WHERE id = $3
           `,
-          [newDue, newStatus, dueBill.id]
+          [newDue, newStatus, dueBill.id],
         );
 
         dueAdjustedAmount += applied;
@@ -1054,7 +1069,7 @@ app.post("/return-bill-item", async (req, res) => {
           SET total_due = GREATEST(total_due - $1, 0)
           WHERE id = $2
           `,
-          [dueAdjustedAmount, customerId]
+          [dueAdjustedAmount, customerId],
         );
       }
     }
@@ -1071,23 +1086,26 @@ app.post("/return-bill-item", async (req, res) => {
           SET store_credit = COALESCE(store_credit, 0) + $1
           WHERE id = $2
           `,
-          [storeCreditAmount, customerId]
+          [storeCreditAmount, customerId],
         );
       }
     } else if (selectedReturnType === "exchange") {
       exchangeBalanceAmount = remainingReturnValue;
     } else if (selectedReturnType === "due_adjustment") {
+      if (adjustDueFirst === false) {
+        throw new Error("Due adjustment option requires due reduction enabled");
+      }
+
       if (remainingReturnValue > 0) {
         throw new Error(
-          "Customer due is lower than return value. Choose cash refund, store credit, or exchange"
+          "Customer due is lower than return value. Choose cash refund, store credit, or exchange",
         );
       }
     }
 
     const pointsToRemove = Math.floor(
-      Number(
-        cashRefundAmount + storeCreditAmount + exchangeBalanceAmount
-      ) / 100
+      Number(cashRefundAmount + storeCreditAmount + exchangeBalanceAmount) /
+        100,
     );
 
     if (customerId && pointsToRemove > 0) {
@@ -1097,7 +1115,7 @@ app.post("/return-bill-item", async (req, res) => {
         SET points = GREATEST(points - $1, 0)
         WHERE id = $2
         `,
-        [pointsToRemove, customerId]
+        [pointsToRemove, customerId],
       );
     }
 
@@ -1107,7 +1125,7 @@ app.post("/return-bill-item", async (req, res) => {
       SET returned_qty = COALESCE(returned_qty, 0) + $1
       WHERE id = $2
       `,
-      [returnQty, billItemId]
+      [returnQty, billItemId],
     );
 
     if (shouldRestock && selectedCondition === "good") {
@@ -1118,7 +1136,7 @@ app.post("/return-bill-item", async (req, res) => {
           SET stock = stock + $1
           WHERE id = $2
           `,
-          [returnQty, item.variant_id]
+          [returnQty, item.variant_id],
         );
       }
 
@@ -1129,7 +1147,7 @@ app.post("/return-bill-item", async (req, res) => {
           SET stock = stock + $1
           WHERE id = $2
           `,
-          [returnQty, item.product_id]
+          [returnQty, item.product_id],
         );
       }
     }
@@ -1186,8 +1204,8 @@ app.post("/return-bill-item", async (req, res) => {
         selectedCondition,
         shouldRestock && selectedCondition === "good",
         override ? true : false,
-        overrideReason || null
-      ]
+        overrideReason || null,
+      ],
     );
 
     await client.query("COMMIT");
@@ -1201,7 +1219,7 @@ app.post("/return-bill-item", async (req, res) => {
       storeCreditAmount,
       exchangeBalanceAmount,
       pointsRemoved: pointsToRemove,
-      restocked: shouldRestock && selectedCondition === "good"
+      restocked: shouldRestock && selectedCondition === "good",
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -1246,18 +1264,18 @@ app.delete("/delete-product/:id", async (req, res) => {
 
     const usedResult = await db.query(
       "SELECT id FROM bill_items WHERE product_id = $1 LIMIT 1",
-      [id]
+      [id],
     );
 
     if (usedResult.rows.length > 0) {
       return res.json({
-        error: "Cannot delete this product because it has sales history"
+        error: "Cannot delete this product because it has sales history",
       });
     }
 
     const result = await db.query(
       "DELETE FROM products WHERE id = $1 RETURNING *",
-      [id]
+      [id],
     );
 
     if (result.rows.length === 0) {
@@ -1266,7 +1284,7 @@ app.delete("/delete-product/:id", async (req, res) => {
 
     res.json({
       message: "Product deleted",
-      product: result.rows[0]
+      product: result.rows[0],
     });
   } catch (err) {
     res.json({ error: err.message });
@@ -1388,9 +1406,8 @@ app.post("/add-product", async (req, res) => {
         product,
         productId,
         costCode,
-        qr: qrImage
+        qr: qrImage,
       });
-
     });
   } catch (err) {
     res.json({ error: err.message });
@@ -1489,7 +1506,7 @@ app.post("/save-bill", async (req, res) => {
 
     for (const item of items) {
       await client.query(
-  `
+        `
   INSERT INTO bill_items
   (
     bill_id,
@@ -1506,23 +1523,22 @@ app.post("/save-bill", async (req, res) => {
   )
   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `,
-  [
-    billId,
-    item.product_id || item.id,
-    item.variant_id || null,
-    item.name,
-    item.size || null,
-    item.qty || 1,
-    item.price,
-    item.cost || 0,
-    item.itemDiscount || 0,
-    item.lineSubtotal ||
-      Number(item.price || 0) * Number(item.qty || 1),
-    item.lineTotal ||
-      (Number(item.price || 0) - Number(item.itemDiscount || 0)) *
-        Number(item.qty || 1)
-  ]
-);
+        [
+          billId,
+          item.product_id || item.id,
+          item.variant_id || null,
+          item.name,
+          item.size || null,
+          item.qty || 1,
+          item.price,
+          item.cost || 0,
+          item.itemDiscount || 0,
+          item.lineSubtotal || Number(item.price || 0) * Number(item.qty || 1),
+          item.lineTotal ||
+            (Number(item.price || 0) - Number(item.itemDiscount || 0)) *
+              Number(item.qty || 1),
+        ],
+      );
     }
 
     res.json({
@@ -1744,7 +1760,7 @@ app.post("/checkout", async (req, res) => {
       paymentMethod,
       offlineRef,
       pointsToRedeem,
-      paidAmount
+      paidAmount,
     } = req.body;
 
     await client.query("BEGIN");
@@ -1778,56 +1794,52 @@ app.post("/checkout", async (req, res) => {
 
     const billTotal = Number(total || 0);
 
-const billPaidAmount =
-  paidAmount === undefined || paidAmount === null || paidAmount === ""
-    ? billTotal
-    : Math.min(Math.max(Number(paidAmount || 0), 0), billTotal);
+    const billPaidAmount =
+      paidAmount === undefined || paidAmount === null || paidAmount === ""
+        ? billTotal
+        : Math.min(Math.max(Number(paidAmount || 0), 0), billTotal);
 
-const billDueAmount = Math.max(billTotal - billPaidAmount, 0);
+    const billDueAmount = Math.max(billTotal - billPaidAmount, 0);
 
-const dueStatus =
-  billDueAmount > 0
-    ? billPaidAmount > 0
-      ? "partial"
-      : "due"
-    : "paid";
+    const dueStatus =
+      billDueAmount > 0 ? (billPaidAmount > 0 ? "partial" : "due") : "paid";
 
-if (billDueAmount > 0 && !customerPhone) {
-  throw new Error("Customer phone is required for due bills");
-}
+    if (billDueAmount > 0 && !customerPhone) {
+      throw new Error("Customer phone is required for due bills");
+    }
 
     let customerId = null;
-let redeemPoints = Number(pointsToRedeem || 0);
-let pointsEarned = Math.floor(Number(billPaidAmount || 0) / 100);
-let customerTotalPoints = 0;
+    let redeemPoints = Number(pointsToRedeem || 0);
+    let pointsEarned = Math.floor(Number(billPaidAmount || 0) / 100);
+    let customerTotalPoints = 0;
 
-if (redeemPoints > 0 && !customerPhone) {
-  throw new Error("Customer phone is required to redeem points");
-}
-
-if (customerPhone) {
-  const existingCustomer = await client.query(
-    "SELECT * FROM customers WHERE phone = $1 FOR UPDATE",
-    [customerPhone]
-  );
-
-  if (redeemPoints > 0) {
-    if (existingCustomer.rows.length === 0) {
-      throw new Error("Customer not found. Cannot redeem points");
+    if (redeemPoints > 0 && !customerPhone) {
+      throw new Error("Customer phone is required to redeem points");
     }
 
-    const availablePoints = Number(existingCustomer.rows[0].points || 0);
+    if (customerPhone) {
+      const existingCustomer = await client.query(
+        "SELECT * FROM customers WHERE phone = $1 FOR UPDATE",
+        [customerPhone],
+      );
 
-    if (redeemPoints > availablePoints) {
-      throw new Error("Customer has only " + availablePoints + " points");
-    }
+      if (redeemPoints > 0) {
+        if (existingCustomer.rows.length === 0) {
+          throw new Error("Customer not found. Cannot redeem points");
+        }
 
-    if (redeemPoints > Number(subtotal || 0)) {
-      throw new Error("Redeem points cannot exceed bill amount");
-    }
+        const availablePoints = Number(existingCustomer.rows[0].points || 0);
 
-    const updatedCustomer = await client.query(
-  `
+        if (redeemPoints > availablePoints) {
+          throw new Error("Customer has only " + availablePoints + " points");
+        }
+
+        if (redeemPoints > Number(subtotal || 0)) {
+          throw new Error("Redeem points cannot exceed bill amount");
+        }
+
+        const updatedCustomer = await client.query(
+          `
   UPDATE customers
   SET name = COALESCE($1, name),
       points = points - $2 + $3,
@@ -1836,22 +1848,21 @@ if (customerPhone) {
   WHERE phone = $6
   RETURNING *
   `,
-  [
-    customerName || null,
-    redeemPoints,
-    pointsEarned,
-    billTotal,
-    billDueAmount,
-    customerPhone
-  ]
-);
+          [
+            customerName || null,
+            redeemPoints,
+            pointsEarned,
+            billTotal,
+            billDueAmount,
+            customerPhone,
+          ],
+        );
 
-    customerId = updatedCustomer.rows[0].id;
-    customerTotalPoints = updatedCustomer.rows[0].points;
-  } else {
-
-    const customerResult = await client.query(
-  `
+        customerId = updatedCustomer.rows[0].id;
+        customerTotalPoints = updatedCustomer.rows[0].points;
+      } else {
+        const customerResult = await client.query(
+          `
   INSERT INTO customers (name, phone, points, total_spent, total_due)
   VALUES ($1, $2, $3, $4, $5)
   ON CONFLICT (phone)
@@ -1862,19 +1873,19 @@ if (customerPhone) {
     total_due = customers.total_due + EXCLUDED.total_due
   RETURNING *
   `,
-  [
-    customerName || "Walk-in",
-    customerPhone,
-    pointsEarned,
-    billTotal,
-    billDueAmount
-  ]
-);
+          [
+            customerName || "Walk-in",
+            customerPhone,
+            pointsEarned,
+            billTotal,
+            billDueAmount,
+          ],
+        );
 
-    customerId = customerResult.rows[0].id;
-    customerTotalPoints = customerResult.rows[0].points;
-  }
-}
+        customerId = customerResult.rows[0].id;
+        customerTotalPoints = customerResult.rows[0].points;
+      }
+    }
 
     const itemCostMap = {};
 
@@ -1959,7 +1970,7 @@ if (customerPhone) {
     }
 
     const billResult = await client.query(
-  `
+      `
   INSERT INTO bills
 (
   subtotal,
@@ -1981,23 +1992,23 @@ if (customerPhone) {
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_DATE + INTERVAL '7 days')
 RETURNING id
   `,
-  [
-  subtotal,
-  discount,
-  total,
-  customerName || null,
-  customerPhone || null,
-  paymentMethod || "Cash",
-  offlineRef || null,
-  customerId,
-  pointsEarned,
-  redeemPoints,
-  redeemPoints,
-  billPaidAmount,
-  billDueAmount,
-  dueStatus
-]
-);
+      [
+        subtotal,
+        discount,
+        total,
+        customerName || null,
+        customerPhone || null,
+        paymentMethod || "Cash",
+        offlineRef || null,
+        customerId,
+        pointsEarned,
+        redeemPoints,
+        redeemPoints,
+        billPaidAmount,
+        billDueAmount,
+        dueStatus,
+      ],
+    );
 
     const billId = billResult.rows[0].id;
 
@@ -2026,17 +2037,16 @@ RETURNING id
     await client.query("COMMIT");
 
     res.json({
-  message: "Checkout completed",
-  billId,
-  pointsEarned,
-  pointsRedeemed: redeemPoints,
-  pointDiscount: redeemPoints,
-  customerTotalPoints,
-  paidAmount: billPaidAmount,
-  dueAmount: billDueAmount,
-  dueStatus
-});
-
+      message: "Checkout completed",
+      billId,
+      pointsEarned,
+      pointsRedeemed: redeemPoints,
+      pointDiscount: redeemPoints,
+      customerTotalPoints,
+      paidAmount: billPaidAmount,
+      dueAmount: billDueAmount,
+      dueStatus,
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
@@ -2140,7 +2150,7 @@ app.get("/product-insights", async (req, res) => {
       categorySales: categorySales.rows,
       trending: trending.rows,
       slowSelling: slowSelling.rows,
-      oldStock: oldStock.rows
+      oldStock: oldStock.rows,
     });
   } catch (err) {
     res.json({ error: err.message });
@@ -2163,7 +2173,7 @@ app.post("/pay-due", async (req, res) => {
 
     const customerResult = await client.query(
       "SELECT * FROM customers WHERE id = $1 FOR UPDATE",
-      [customerId]
+      [customerId],
     );
 
     if (customerResult.rows.length === 0) {
@@ -2188,7 +2198,7 @@ app.post("/pay-due", async (req, res) => {
       ORDER BY created_at ASC
       FOR UPDATE
       `,
-      [customerId]
+      [customerId],
     );
 
     for (const bill of dueBills.rows) {
@@ -2207,7 +2217,7 @@ app.post("/pay-due", async (req, res) => {
             due_status = $3
         WHERE id = $4
         `,
-        [applied, newDue, newStatus, bill.id]
+        [applied, newDue, newStatus, bill.id],
       );
 
       await client.query(
@@ -2216,13 +2226,7 @@ app.post("/pay-due", async (req, res) => {
         (customer_id, bill_id, amount, payment_method, note)
         VALUES ($1, $2, $3, $4, $5)
         `,
-        [
-          customerId,
-          bill.id,
-          applied,
-          paymentMethod || "Cash",
-          note || null
-        ]
+        [customerId, bill.id, applied, paymentMethod || "Cash", note || null],
       );
 
       remainingPayment -= applied;
@@ -2238,7 +2242,7 @@ app.post("/pay-due", async (req, res) => {
       WHERE id = $3
       RETURNING *
       `,
-      [payAmount, pointsEarned, customerId]
+      [payAmount, pointsEarned, customerId],
     );
 
     await client.query("COMMIT");
@@ -2247,7 +2251,7 @@ app.post("/pay-due", async (req, res) => {
       message: "Due payment saved",
       customer: updatedCustomer.rows[0],
       paidAmount: payAmount,
-      pointsEarned
+      pointsEarned,
     });
   } catch (err) {
     await client.query("ROLLBACK");
