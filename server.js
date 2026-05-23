@@ -96,6 +96,23 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+app.get("/bill-qr/:id", async (req, res) => {
+  try {
+    const billId = req.params.id;
+
+    const qrData = "bill:" + billId;
+    const qrImage = await QRCode.toDataURL(qrData);
+
+    res.json({
+      billId,
+      qrData,
+      qr: qrImage,
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/customer/:id/purchases", async (req, res) => {
   try {
     const customerId = req.params.id;
