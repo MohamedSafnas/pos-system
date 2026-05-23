@@ -2104,6 +2104,8 @@ app.post("/checkout", async (req, res) => {
       }
     }
 
+    const oldDuePayAmount = Number(oldDuePayment || 0);
+
     const billResult = await client.query(
       `
   INSERT INTO bills
@@ -2123,9 +2125,10 @@ app.post("/checkout", async (req, res) => {
   due_amount,
   due_status,
   store_credit_used,
+  old_due_payment,
   return_deadline
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_DATE + INTERVAL '7 days')
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, CURRENT_DATE + INTERVAL '7 days')
 RETURNING id
   `,
       [
@@ -2144,12 +2147,11 @@ RETURNING id
         billDueAmount,
         dueStatus,
         appliedStoreCredit,
+        oldDuePayAmount,
       ],
     );
 
     const billId = billResult.rows[0].id;
-
-    const oldDuePayAmount = Number(oldDuePayment || 0);
 
     if (oldDuePayAmount > 0) {
       if (!customerId) {
@@ -2303,6 +2305,7 @@ RETURNING id
   dueStatus,
   oldDuePayment: Number(oldDuePayment || 0),
   storeCreditUsed: appliedStoreCredit,
+  oldDuePayment: oldDuePayAmount,
 });
   } catch (err) {
     await client.query("ROLLBACK");
