@@ -904,6 +904,7 @@ app.post("/return-bill-item", async (req, res) => {
     b.discount AS bill_discount,
     b.point_discount,
     b.due_amount AS bill_due_amount,
+    b.total AS bill_total,
     b.return_deadline,
     b.created_at AS bill_date
   FROM bill_items bi
@@ -940,19 +941,19 @@ app.post("/return-bill-item", async (req, res) => {
 
     const billLineTotalResult = await client.query(
       `
-      SELECT
-        COALESCE(
-          SUM(
-            COALESCE(
-              line_total,
-              (price - COALESCE(item_discount, 0)) * COALESCE(qty, 1)
-            )
-          ),
-          0
-        ) AS bill_line_total
-      FROM bill_items
-      WHERE bill_id = $1
-      `,
+  SELECT
+    COALESCE(
+      SUM(
+        CASE
+          WHEN COALESCE(line_total, 0) > 0 THEN line_total
+          ELSE (price - COALESCE(item_discount, 0)) * COALESCE(qty, 1)
+        END
+      ),
+      0
+    ) AS bill_line_total
+  FROM bill_items
+  WHERE bill_id = $1
+  `,
       [billId],
     );
 
@@ -964,23 +965,24 @@ app.post("/return-bill-item", async (req, res) => {
     const cost = Number(item.cost || 0);
     const itemDiscount = Number(item.item_discount || 0);
 
-    const itemLineTotal = Number(
-      item.line_total || (price - itemDiscount) * soldQty,
-    );
+    const savedLineTotal = Number(item.line_total || 0);
 
-    const globalDiscount =
-      Number(item.bill_discount || 0) + Number(item.point_discount || 0);
+    const itemLineTotal =
+      savedLineTotal > 0
+        ? savedLineTotal
+        : Math.max(price - itemDiscount, 0) * soldQty;
 
-    const itemGlobalDiscountShare =
-      billLineTotal > 0 ? (itemLineTotal / billLineTotal) * globalDiscount : 0;
+    const billFinalTotal = Number(item.bill_total || 0);
 
-    const itemFinalLineTotal = Math.max(
-      itemLineTotal - itemGlobalDiscountShare,
-      0,
-    );
+    const itemFinalLineTotal =
+      billLineTotal > 0 && billFinalTotal > 0
+        ? (itemLineTotal / billLineTotal) * billFinalTotal
+        : itemLineTotal;
 
-    const returnUnitValue = itemFinalLineTotal / soldQty;
+    const returnUnitValue = soldQty > 0 ? itemFinalLineTotal / soldQty : 0;
+
     let returnAmount = returnUnitValue * returnQty;
+    returnAmount = Number(returnAmount.toFixed(2));
 
     const selectedReturnType = returnType || "cash_refund";
     const selectedCondition = itemCondition || "good";
@@ -2077,26 +2079,69 @@ RETURNING id
     const billId = billResult.rows[0].id;
 
     for (const item of items) {
-      const costKey = item.variant_id || item.id;
+  const costKey = item.variant_id || item.id;
 
-      await client.query(
-        `
-        INSERT INTO bill_items
-        (bill_id, product_id, variant_id, size, product_name, price, qty, cost)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        `,
-        [
-          billId,
-          item.product_id || item.id,
-          item.variant_id || null,
-          item.size || null,
-          item.name,
-          item.price,
-          Number(item.qty || 1),
-          itemCostMap[costKey] || 0,
-        ],
-      );
-    }
+  const itemQty = Number(item.qty || 1);
+  const itemPrice = Number(item.price || 0);
+
+  const itemDiscount = Number(
+    item.itemDiscount || item.item_discount || 0
+  );
+
+  const safeItemDiscount =
+    itemDiscount > itemPrice ? itemPrice : itemDiscount;
+
+  const givenLineSubtotal = Number(
+    item.lineSubtotal || item.line_subtotal || 0
+  );
+
+  const givenLineTotal = Number(
+    item.lineTotal || item.line_total || 0
+  );
+
+  const lineSubtotal =
+    givenLineSubtotal > 0
+      ? givenLineSubtotal
+      : itemPrice * itemQty;
+
+  const lineTotal =
+    givenLineTotal > 0
+      ? givenLineTotal
+      : Math.max(itemPrice - safeItemDiscount, 0) * itemQty;
+
+  await client.query(
+    `
+    INSERT INTO bill_items
+    (
+      bill_id,
+      product_id,
+      variant_id,
+      size,
+      product_name,
+      price,
+      qty,
+      cost,
+      item_discount,
+      line_subtotal,
+      line_total
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `,
+    [
+      billId,
+      item.product_id || item.id,
+      item.variant_id || null,
+      item.size || null,
+      item.name,
+      itemPrice,
+      itemQty,
+      itemCostMap[costKey] || 0,
+      safeItemDiscount,
+      lineSubtotal,
+      lineTotal,
+    ],
+  );
+}
 
     await client.query("COMMIT");
 
