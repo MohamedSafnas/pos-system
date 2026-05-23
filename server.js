@@ -1114,6 +1114,17 @@ app.post("/return-bill-item", async (req, res) => {
       }
     } else if (selectedReturnType === "exchange") {
       exchangeBalanceAmount = remainingReturnValue;
+
+      if (customerId && exchangeBalanceAmount > 0) {
+        await client.query(
+          `
+      UPDATE customers
+      SET store_credit = COALESCE(store_credit, 0) + $1
+      WHERE id = $2
+      `,
+          [exchangeBalanceAmount, customerId],
+        );
+      }
     } else if (selectedReturnType === "due_adjustment") {
       if (adjustDueFirst === false) {
         throw new Error("Due adjustment option requires due reduction enabled");
@@ -2079,38 +2090,32 @@ RETURNING id
     const billId = billResult.rows[0].id;
 
     for (const item of items) {
-  const costKey = item.variant_id || item.id;
+      const costKey = item.variant_id || item.id;
 
-  const itemQty = Number(item.qty || 1);
-  const itemPrice = Number(item.price || 0);
+      const itemQty = Number(item.qty || 1);
+      const itemPrice = Number(item.price || 0);
 
-  const itemDiscount = Number(
-    item.itemDiscount || item.item_discount || 0
-  );
+      const itemDiscount = Number(item.itemDiscount || item.item_discount || 0);
 
-  const safeItemDiscount =
-    itemDiscount > itemPrice ? itemPrice : itemDiscount;
+      const safeItemDiscount =
+        itemDiscount > itemPrice ? itemPrice : itemDiscount;
 
-  const givenLineSubtotal = Number(
-    item.lineSubtotal || item.line_subtotal || 0
-  );
+      const givenLineSubtotal = Number(
+        item.lineSubtotal || item.line_subtotal || 0,
+      );
 
-  const givenLineTotal = Number(
-    item.lineTotal || item.line_total || 0
-  );
+      const givenLineTotal = Number(item.lineTotal || item.line_total || 0);
 
-  const lineSubtotal =
-    givenLineSubtotal > 0
-      ? givenLineSubtotal
-      : itemPrice * itemQty;
+      const lineSubtotal =
+        givenLineSubtotal > 0 ? givenLineSubtotal : itemPrice * itemQty;
 
-  const lineTotal =
-    givenLineTotal > 0
-      ? givenLineTotal
-      : Math.max(itemPrice - safeItemDiscount, 0) * itemQty;
+      const lineTotal =
+        givenLineTotal > 0
+          ? givenLineTotal
+          : Math.max(itemPrice - safeItemDiscount, 0) * itemQty;
 
-  await client.query(
-    `
+      await client.query(
+        `
     INSERT INTO bill_items
     (
       bill_id,
@@ -2127,21 +2132,21 @@ RETURNING id
     )
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `,
-    [
-      billId,
-      item.product_id || item.id,
-      item.variant_id || null,
-      item.size || null,
-      item.name,
-      itemPrice,
-      itemQty,
-      itemCostMap[costKey] || 0,
-      safeItemDiscount,
-      lineSubtotal,
-      lineTotal,
-    ],
-  );
-}
+        [
+          billId,
+          item.product_id || item.id,
+          item.variant_id || null,
+          item.size || null,
+          item.name,
+          itemPrice,
+          itemQty,
+          itemCostMap[costKey] || 0,
+          safeItemDiscount,
+          lineSubtotal,
+          lineTotal,
+        ],
+      );
+    }
 
     await client.query("COMMIT");
 
