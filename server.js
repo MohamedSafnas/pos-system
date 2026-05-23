@@ -450,7 +450,7 @@ app.get("/customer/:phone", async (req, res) => {
       WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')
           = regexp_replace($1, '[^0-9]', '', 'g')
       `,
-      [phone]
+      [phone],
     );
 
     if (result.rows.length === 0) {
@@ -1853,6 +1853,8 @@ app.post("/checkout", async (req, res) => {
       offlineRef,
       pointsToRedeem,
       paidAmount,
+      oldDuePayment,
+      storeCreditUsed,
     } = req.body;
 
     await client.query("BEGIN");
@@ -1886,12 +1888,26 @@ app.post("/checkout", async (req, res) => {
 
     const billTotal = Number(total || 0);
 
+    const appliedStoreCredit = Math.min(
+      Math.max(Number(storeCreditUsed || 0), 0),
+      billTotal,
+    );
+
+    if (appliedStoreCredit > 0 && !customerPhone) {
+      throw new Error("Customer phone is required to use store credit");
+    }
+
+    const payableAfterStoreCredit = Math.max(billTotal - appliedStoreCredit, 0);
+
     const billPaidAmount =
       paidAmount === undefined || paidAmount === null || paidAmount === ""
-        ? billTotal
-        : Math.min(Math.max(Number(paidAmount || 0), 0), billTotal);
+        ? payableAfterStoreCredit
+        : Math.min(
+            Math.max(Number(paidAmount || 0), 0),
+            payableAfterStoreCredit,
+          );
 
-    const billDueAmount = Math.max(billTotal - billPaidAmount, 0);
+    const billDueAmount = Math.max(payableAfterStoreCredit - billPaidAmount, 0);
 
     const dueStatus =
       billDueAmount > 0 ? (billPaidAmount > 0 ? "partial" : "due") : "paid";
@@ -1914,6 +1930,22 @@ app.post("/checkout", async (req, res) => {
         "SELECT * FROM customers WHERE phone = $1 FOR UPDATE",
         [customerPhone],
       );
+
+      if (appliedStoreCredit > 0) {
+        if (existingCustomer.rows.length === 0) {
+          throw new Error("Customer not found. Cannot use store credit");
+        }
+
+        const availableStoreCredit = Number(
+          existingCustomer.rows[0].store_credit || 0,
+        );
+
+        if (appliedStoreCredit > availableStoreCredit) {
+          throw new Error(
+            "Customer has only Rs " + availableStoreCredit + " store credit",
+          );
+        }
+      }
 
       if (redeemPoints > 0) {
         if (existingCustomer.rows.length === 0) {
@@ -1977,6 +2009,17 @@ app.post("/checkout", async (req, res) => {
         customerId = customerResult.rows[0].id;
         customerTotalPoints = customerResult.rows[0].points;
       }
+    }
+
+    if (appliedStoreCredit > 0 && customerId) {
+      await client.query(
+        `
+    UPDATE customers
+    SET store_credit = GREATEST(COALESCE(store_credit, 0) - $1, 0)
+    WHERE id = $2
+    `,
+        [appliedStoreCredit, customerId],
+      );
     }
 
     const itemCostMap = {};
@@ -2079,9 +2122,10 @@ app.post("/checkout", async (req, res) => {
   paid_amount,
   due_amount,
   due_status,
+  store_credit_used,
   return_deadline
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_DATE + INTERVAL '7 days')
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_DATE + INTERVAL '7 days')
 RETURNING id
   `,
       [
@@ -2099,10 +2143,92 @@ RETURNING id
         billPaidAmount,
         billDueAmount,
         dueStatus,
+        appliedStoreCredit,
       ],
     );
 
     const billId = billResult.rows[0].id;
+
+    const oldDuePayAmount = Number(oldDuePayment || 0);
+
+    if (oldDuePayAmount > 0) {
+      if (!customerId) {
+        throw new Error("Customer required to pay old due");
+      }
+
+      let remainingOldDuePayment = oldDuePayAmount;
+
+      const dueBills = await client.query(
+        `
+    SELECT id, due_amount
+    FROM bills
+    WHERE customer_id = $1
+      AND due_amount > 0
+    ORDER BY
+      CASE WHEN id = $2 THEN 1 ELSE 0 END,
+      created_at ASC
+    FOR UPDATE
+    `,
+        [customerId, billId],
+      );
+
+      for (const dueBill of dueBills.rows) {
+        if (remainingOldDuePayment <= 0) break;
+
+        const billDue = Number(dueBill.due_amount || 0);
+        const applied = Math.min(remainingOldDuePayment, billDue);
+        const newDue = billDue - applied;
+        const newStatus = newDue <= 0 ? "paid" : "partial";
+
+        await client.query(
+          `
+      UPDATE bills
+      SET paid_amount = COALESCE(paid_amount, 0) + $1,
+          due_amount = $2,
+          due_status = $3
+      WHERE id = $4
+      `,
+          [applied, newDue, newStatus, dueBill.id],
+        );
+
+        await client.query(
+          `
+      INSERT INTO due_payments
+      (customer_id, bill_id, amount, payment_method, note)
+      VALUES ($1, $2, $3, $4, $5)
+      `,
+          [
+            customerId,
+            dueBill.id,
+            applied,
+            paymentMethod || "Cash",
+            "Paid during new bill checkout",
+          ],
+        );
+
+        remainingOldDuePayment -= applied;
+      }
+
+      const duePointsEarned = Math.floor(oldDuePayAmount / 100);
+
+      await client.query(
+        `
+    UPDATE customers c
+    SET
+      total_due = COALESCE((
+        SELECT SUM(COALESCE(b.due_amount, 0))
+        FROM bills b
+        WHERE b.customer_id = c.id
+          AND b.due_amount > 0
+      ), 0),
+      points = points + $1
+    WHERE id = $2
+    `,
+        [duePointsEarned, customerId],
+      );
+
+      pointsEarned += duePointsEarned;
+    }
 
     for (const item of items) {
       const costKey = item.variant_id || item.id;
@@ -2166,16 +2292,18 @@ RETURNING id
     await client.query("COMMIT");
 
     res.json({
-      message: "Checkout completed",
-      billId,
-      pointsEarned,
-      pointsRedeemed: redeemPoints,
-      pointDiscount: redeemPoints,
-      customerTotalPoints,
-      paidAmount: billPaidAmount,
-      dueAmount: billDueAmount,
-      dueStatus,
-    });
+  message: "Checkout completed",
+  billId,
+  pointsEarned,
+  pointsRedeemed: redeemPoints,
+  pointDiscount: redeemPoints,
+  customerTotalPoints,
+  paidAmount: billPaidAmount,
+  dueAmount: billDueAmount,
+  dueStatus,
+  oldDuePayment: Number(oldDuePayment || 0),
+  storeCreditUsed: appliedStoreCredit,
+});
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
