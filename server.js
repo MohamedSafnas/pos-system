@@ -419,6 +419,7 @@ app.get("/customers", async (req, res) => {
         points,
         total_spent,
         total_due,
+        COALESCE(store_credit, 0) AS store_credit,
         created_at
       FROM customers
       ORDER BY id DESC
@@ -434,9 +435,23 @@ app.get("/customer/:phone", async (req, res) => {
   try {
     const phone = req.params.phone;
 
-    const result = await db.query("SELECT * FROM customers WHERE phone = $1", [
-      phone,
-    ]);
+    const result = await db.query(
+      `
+      SELECT
+        id,
+        name,
+        phone,
+        points,
+        total_spent,
+        total_due,
+        COALESCE(store_credit, 0) AS store_credit,
+        created_at
+      FROM customers
+      WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')
+          = regexp_replace($1, '[^0-9]', '', 'g')
+      `,
+      [phone]
+    );
 
     if (result.rows.length === 0) {
       return res.json({ error: "Customer not found" });
