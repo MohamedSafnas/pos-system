@@ -1078,6 +1078,17 @@ app.post("/return-bill-item", async (req, res) => {
         dueAdjustedAmount += applied;
         remainingReturnValue -= applied;
       }
+
+      console.log("RETURN DUE DEBUG:", {
+        billId,
+        customerId,
+        customerPhone,
+        adjustDueFirst,
+        returnAmount,
+        dueBillsFound: dueBills.rows.length,
+        dueAdjustedAmount,
+        remainingReturnValue,
+      });
     }
 
     if (selectedReturnType === "cash_refund") {
@@ -1113,18 +1124,33 @@ app.post("/return-bill-item", async (req, res) => {
       ? Math.floor(Number(returnAmount || 0) / 100)
       : 0;
 
+    let updatedCustomer = null;
+
     if (customerId) {
-      await client.query(
+      const updatedCustomerResult = await client.query(
         `
-    UPDATE customers
+    UPDATE customers c
     SET
-      total_due = GREATEST(COALESCE(total_due, 0) - $1, 0),
-      total_spent = GREATEST(COALESCE(total_spent, 0) - $2, 0),
-      points = GREATEST(COALESCE(points, 0) - $3, 0)
-    WHERE id = $4
+      total_due = COALESCE((
+        SELECT SUM(COALESCE(b.due_amount, 0))
+        FROM bills b
+        WHERE
+          b.due_amount > 0
+          AND (
+            b.customer_id = c.id
+            OR regexp_replace(COALESCE(b.customer_phone, ''), '[^0-9]', '', 'g')
+               = regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g')
+          )
+      ), 0),
+      total_spent = GREATEST(COALESCE(total_spent, 0) - $1, 0),
+      points = GREATEST(COALESCE(points, 0) - $2, 0)
+    WHERE c.id = $3
+    RETURNING id, name, phone, total_due, points, total_spent
     `,
-        [dueAdjustedAmount, returnAmount, pointsToRemove, customerId],
+        [returnAmount, pointsToRemove, customerId],
       );
+
+      updatedCustomer = updatedCustomerResult.rows[0];
     }
 
     await client.query(
@@ -1248,6 +1274,7 @@ app.post("/return-bill-item", async (req, res) => {
       customerId,
       customerPhone,
       adjustDueFirst,
+      updatedCustomer,
     });
   } catch (err) {
     await client.query("ROLLBACK");
