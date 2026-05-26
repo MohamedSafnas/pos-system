@@ -113,6 +113,219 @@ app.get("/bill-qr/:id", async (req, res) => {
   }
 });
 
+app.get("/customer-card/:phone", async (req, res) => {
+  try {
+    const phone = req.params.phone;
+
+    const customerResult = await db.query(
+      `
+      SELECT *
+      FROM customers
+      WHERE regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')
+          = regexp_replace($1, '[^0-9]', '', 'g')
+      `,
+      [phone],
+    );
+
+    if (customerResult.rows.length === 0) {
+      return res.json({ error: "Customer not found" });
+    }
+
+    let customer = customerResult.rows[0];
+
+    if (!customer.card_number) {
+      const cardNumber = "TC-" + String(customer.id).padStart(6, "0");
+
+      const updateResult = await db.query(
+        `
+        UPDATE customers
+        SET card_number = $1,
+            card_issued_at = COALESCE(card_issued_at, CURRENT_TIMESTAMP),
+            membership_level = COALESCE(membership_level, 'Premium')
+        WHERE id = $2
+        RETURNING *
+        `,
+        [cardNumber, customer.id],
+      );
+
+      customer = updateResult.rows[0];
+    }
+
+    const qrData = "customer:" + customer.phone;
+    const qr = await QRCode.toDataURL(qrData);
+
+    res.json({
+      customer,
+      qrData,
+      qr,
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.post("/customer-requests", async (req, res) => {
+  try {
+    const {
+      customerName,
+      customerPhone,
+      requestText,
+      suggestion,
+      dateAsked,
+      dateWanted,
+      status,
+      notes,
+    } = req.body;
+
+    if (!customerPhone || !requestText) {
+      return res.json({
+        error: "Customer phone and request are required",
+      });
+    }
+
+    const result = await db.query(
+      `
+      INSERT INTO customer_requests
+      (
+        customer_name,
+        customer_phone,
+        request_text,
+        suggestion,
+        date_asked,
+        date_wanted,
+        status,
+        notes
+      )
+      VALUES ($1, $2, $3, $4, COALESCE($5::date, CURRENT_DATE), $6, $7, $8)
+      RETURNING *
+      `,
+      [
+        customerName || null,
+        customerPhone,
+        requestText,
+        suggestion || null,
+        dateAsked || null,
+        dateWanted || null,
+        status || "pending",
+        notes || null,
+      ],
+    );
+
+    res.json({
+      message: "Customer request saved",
+      request: result.rows[0],
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/customer-requests", async (req, res) => {
+  try {
+    const { status, q } = req.query;
+
+    const result = await db.query(
+      `
+      SELECT *
+      FROM customer_requests
+      WHERE
+        ($1::text IS NULL OR status = $1)
+        AND (
+          $2::text IS NULL
+          OR customer_name ILIKE '%' || $2 || '%'
+          OR customer_phone ILIKE '%' || $2 || '%'
+          OR request_text ILIKE '%' || $2 || '%'
+          OR suggestion ILIKE '%' || $2 || '%'
+        )
+      ORDER BY
+        CASE
+          WHEN status = 'pending' THEN 1
+          WHEN status = 'ordered' THEN 2
+          WHEN status = 'arrived' THEN 3
+          WHEN status = 'completed' THEN 4
+          ELSE 5
+        END,
+        date_wanted ASC NULLS LAST,
+        created_at DESC
+      `,
+      [status || null, q || null],
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.patch("/customer-requests/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    const {
+      customerName,
+      customerPhone,
+      requestText,
+      suggestion,
+      dateAsked,
+      dateWanted,
+      status,
+      notes,
+    } = req.body;
+
+    const result = await db.query(
+      `
+      UPDATE customer_requests
+      SET
+        customer_name = COALESCE($1, customer_name),
+        customer_phone = COALESCE($2, customer_phone),
+        request_text = COALESCE($3, request_text),
+        suggestion = COALESCE($4, suggestion),
+        date_asked = COALESCE($5::date, date_asked),
+        date_wanted = COALESCE($6::date, date_wanted),
+        status = COALESCE($7, status),
+        notes = COALESCE($8, notes),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = $9
+      RETURNING *
+      `,
+      [
+        customerName || null,
+        customerPhone || null,
+        requestText || null,
+        suggestion || null,
+        dateAsked || null,
+        dateWanted || null,
+        status || null,
+        notes || null,
+        id,
+      ],
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ error: "Customer request not found" });
+    }
+
+    res.json({
+      message: "Customer request updated",
+      request: result.rows[0],
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.delete("/customer-requests/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+
+    await db.query("DELETE FROM customer_requests WHERE id = $1", [id]);
+
+    res.json({ message: "Customer request deleted" });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/customer/:id/purchases", async (req, res) => {
   try {
     const customerId = req.params.id;
@@ -2311,19 +2524,19 @@ RETURNING id
     await client.query("COMMIT");
 
     res.json({
-  message: "Checkout completed",
-  billId,
-  pointsEarned,
-  pointsRedeemed: redeemPoints,
-  pointDiscount: redeemPoints,
-  customerTotalPoints,
-  paidAmount: billPaidAmount,
-  dueAmount: billDueAmount,
-  dueStatus,
-  oldDuePayment: Number(oldDuePayment || 0),
-  storeCreditUsed: appliedStoreCredit,
-  oldDuePayment: oldDuePayAmount,
-});
+      message: "Checkout completed",
+      billId,
+      pointsEarned,
+      pointsRedeemed: redeemPoints,
+      pointDiscount: redeemPoints,
+      customerTotalPoints,
+      paidAmount: billPaidAmount,
+      dueAmount: billDueAmount,
+      dueStatus,
+      oldDuePayment: Number(oldDuePayment || 0),
+      storeCreditUsed: appliedStoreCredit,
+      oldDuePayment: oldDuePayAmount,
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     res.json({ error: err.message });
