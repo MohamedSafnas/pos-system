@@ -96,6 +96,60 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+app.post("/verify-admin-action", async (req, res) => {
+  try {
+    const {
+      pin,
+      biometricApproved,
+      action,
+      reason,
+      billId,
+      productId,
+      details,
+    } = req.body;
+
+    const ADMIN_PIN = process.env.ADMIN_OVERRIDE_PIN || "1234";
+
+    if (!pin && !biometricApproved) {
+      return res.json({ error: "Admin PIN or fingerprint required" });
+    }
+
+    if (!biometricApproved && String(pin) !== String(ADMIN_PIN)) {
+      return res.json({ error: "Invalid admin PIN" });
+    }
+
+    await db.query(
+      `
+      INSERT INTO audit_logs
+      (
+        action,
+        actor_role,
+        bill_id,
+        product_id,
+        reason,
+        details
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [
+        action || "admin_action",
+        biometricApproved ? "admin_biometric" : "admin_pin",
+        billId || null,
+        productId || null,
+        reason || null,
+        details ? JSON.stringify(details) : null,
+      ],
+    );
+
+    res.json({
+      verified: true,
+      message: "Admin verified",
+    });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
 app.get("/bill-qr/:id", async (req, res) => {
   try {
     const billId = req.params.id;
@@ -108,6 +162,36 @@ app.get("/bill-qr/:id", async (req, res) => {
       qrData,
       qr: qrImage,
     });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
+
+app.get("/customer/:phone/requests", async (req, res) => {
+  try {
+    const phone = req.params.phone;
+
+    const result = await db.query(
+      `
+      SELECT *
+      FROM customer_requests
+      WHERE regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')
+          = regexp_replace($1, '[^0-9]', '', 'g')
+      ORDER BY
+        CASE
+          WHEN status = 'pending' THEN 1
+          WHEN status = 'ordered' THEN 2
+          WHEN status = 'arrived' THEN 3
+          WHEN status = 'completed' THEN 4
+          ELSE 5
+        END,
+        date_wanted ASC NULLS LAST,
+        created_at DESC
+      `,
+      [phone],
+    );
+
+    res.json(result.rows);
   } catch (err) {
     res.json({ error: err.message });
   }
