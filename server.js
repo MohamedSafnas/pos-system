@@ -96,6 +96,53 @@ app.get("/", (req, res) => {
   res.send("POS Cloud Running");
 });
 
+app.put("/customer/:id", async (req, res) => {
+  try {
+    const customerId = req.params.id;
+    const { name, phone, membershipLevel } = req.body;
+
+    if (!name || !phone) {
+      return res.status(400).json({
+        error: "Name and phone are required",
+      });
+    }
+
+    const result = await db.query(
+      `
+      UPDATE customers
+      SET
+        name = $1,
+        phone = $2,
+        membership_level = COALESCE($3, membership_level)
+      WHERE id = $4
+      RETURNING *
+      `,
+      [
+        name.trim(),
+        phone.trim(),
+        membershipLevel || null,
+        customerId,
+      ],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Customer not found",
+      });
+    }
+
+    res.json({
+      message: "Customer updated successfully",
+      customer: result.rows[0],
+    });
+  } catch (err) {
+    console.log("UPDATE CUSTOMER ERROR:", err);
+    res.status(500).json({
+      error: err.message,
+    });
+  }
+});
+
 app.post("/verify-admin-action", async (req, res) => {
   try {
     const {
@@ -1275,7 +1322,10 @@ app.post("/return-bill-item", async (req, res) => {
       SUM(
         CASE
           WHEN COALESCE(line_total, 0) > 0 THEN line_total
-          ELSE (price - COALESCE(item_discount, 0)) * COALESCE(qty, 1)
+          ELSE GREATEST(
+  price * COALESCE(qty, 1) - COALESCE(item_discount, 0),
+  0
+)
         END
       ),
       0
@@ -1296,10 +1346,20 @@ app.post("/return-bill-item", async (req, res) => {
 
     const savedLineTotal = Number(item.line_total || 0);
 
-    const itemLineTotal =
+    /*const itemLineTotal =
       savedLineTotal > 0
         ? savedLineTotal
-        : Math.max(price - itemDiscount, 0) * soldQty;
+        : Math.max(price - itemDiscount, 0) * soldQty;*/
+
+        const itemLineTotal =
+  savedLineTotal > 0
+    ? savedLineTotal
+    : Math.max(
+        price * soldQty - itemDiscount,
+        0
+      );
+
+
 
     const billFinalTotal = Number(item.bill_total || 0);
 
@@ -2566,10 +2626,20 @@ RETURNING id
       const lineSubtotal =
         givenLineSubtotal > 0 ? givenLineSubtotal : itemPrice * itemQty;
 
-      const lineTotal =
+      /*const lineTotal =
         givenLineTotal > 0
           ? givenLineTotal
-          : Math.max(itemPrice - safeItemDiscount, 0) * itemQty;
+          : Math.max(itemPrice - safeItemDiscount, 0) * itemQty;*/
+
+          const lineTotal =
+  givenLineTotal > 0
+    ? givenLineTotal
+    : Math.max(
+        itemPrice * itemQty - safeItemDiscount,
+        0
+      );
+
+
 
       await client.query(
         `
