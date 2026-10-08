@@ -665,13 +665,46 @@ app.get("/product-sales", async (req, res) => {
           SUM(bi.price * COALESCE(bi.qty, 1)) AS gross_revenue,
           SUM(bi.price * COALESCE(bi.returned_qty, 0)) AS returned_amount,
           SUM(
-            bi.price *
-            GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
-          ) AS net_revenue,
+  CASE
+    WHEN COALESCE(bi.qty, 1) > 0 THEN
+      COALESCE(bi.line_total, bi.price * COALESCE(bi.qty, 1))
+      *
+      (
+        GREATEST(
+          COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0),
+          0
+        )
+        / COALESCE(bi.qty, 1)::numeric
+      )
+    ELSE 0
+  END
+) AS net_revenue,
           SUM(
-            (bi.price - COALESCE(bi.cost, 0)) *
-            GREATEST(COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0), 0)
-          ) AS profit
+  CASE
+    WHEN COALESCE(bi.qty, 1) > 0 THEN
+      (
+        COALESCE(bi.line_total, bi.price * COALESCE(bi.qty, 1))
+        *
+        (
+          GREATEST(
+            COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0),
+            0
+          )
+          / COALESCE(bi.qty, 1)::numeric
+        )
+      )
+      -
+      (
+        COALESCE(bi.cost, 0)
+        *
+        GREATEST(
+          COALESCE(bi.qty, 1) - COALESCE(bi.returned_qty, 0),
+          0
+        )
+      )
+    ELSE 0
+  END
+) AS profit
         FROM bill_items bi
         LEFT JOIN products p ON p.id = bi.product_id
         GROUP BY
@@ -728,7 +761,11 @@ app.get("/cash-flow", async (req, res) => {
       SELECT
         COALESCE((SELECT SUM(total) FROM bills), 0) AS "netSales",
         COALESCE((SELECT SUM(subtotal) FROM bills), 0) AS "grossSales",
-        COALESCE((SELECT SUM(discount) FROM bills), 0) AS "manualDiscounts",
+        (
+  COALESCE((SELECT SUM(discount) FROM bills), 0)
+  +
+  COALESCE((SELECT SUM(item_discount) FROM bill_items), 0)
+) AS "manualDiscounts",
         COALESCE((SELECT SUM(point_discount) FROM bills), 0) AS "pointDiscounts",
         COALESCE((SELECT SUM(price * qty) FROM returns), 0) AS "returnsAmount",
 
@@ -751,17 +788,37 @@ app.get("/cash-flow", async (req, res) => {
         ), 0) AS "transferSales",
 
         COALESCE((
-          SELECT SUM(
-            (price - COALESCE(cost, 0)) *
-            GREATEST(COALESCE(qty, 1) - COALESCE(returned_qty, 0), 0)
+  SELECT SUM(
+    CASE
+      WHEN COALESCE(qty, 1) > 0 THEN
+        (
+          COALESCE(line_total, price * COALESCE(qty, 1))
+          *
+          (
+            GREATEST(
+              COALESCE(qty, 1) - COALESCE(returned_qty, 0),
+              0
+            )
+            / COALESCE(qty, 1)::numeric
           )
-          FROM bill_items
-        ), 0)
+        )
         -
-        COALESCE((SELECT SUM(discount) FROM bills), 0)
-        -
-        COALESCE((SELECT SUM(point_discount) FROM bills), 0)
-        AS "profit"
+        (
+          COALESCE(cost, 0)
+          *
+          GREATEST(
+            COALESCE(qty, 1) - COALESCE(returned_qty, 0),
+            0
+          )
+        )
+      ELSE 0
+    END
+  )
+  FROM bill_items
+), 0)
+-
+COALESCE((SELECT SUM(point_discount) FROM bills), 0)
+AS "profit"
     `);
 
     res.json(result.rows[0]);
