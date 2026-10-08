@@ -2831,21 +2831,24 @@ app.post("/pay-due", async (req, res) => {
       throw new Error("Payment cannot exceed customer due amount");
     }
 
+    // Save the due before this payment
+    const previousDue = totalDue;
+
     let remainingPayment = payAmount;
 
     const dueBills = await client.query(
       `
-  SELECT id, due_amount
-  FROM bills
-  WHERE (customer_id = $1 OR customer_phone = $3)
-    AND due_amount > 0
-  ORDER BY
-    CASE WHEN id = $2 THEN 0 ELSE 1 END,
-    created_at ASC
-  FOR UPDATE
-  `,
-      [customerId, billId, customerPhone || ""],
+      SELECT id, due_amount
+      FROM bills
+      WHERE customer_id = $1
+        AND due_amount > 0
+      ORDER BY created_at ASC
+      FOR UPDATE
+      `,
+      [customerId],
     );
+
+    const paymentAllocations = [];
 
     for (const bill of dueBills.rows) {
       if (remainingPayment <= 0) break;
@@ -2866,14 +2869,28 @@ app.post("/pay-due", async (req, res) => {
         [applied, newDue, newStatus, bill.id],
       );
 
-      await client.query(
+      const paymentResult = await client.query(
         `
         INSERT INTO due_payments
         (customer_id, bill_id, amount, payment_method, note)
         VALUES ($1, $2, $3, $4, $5)
+        RETURNING id, created_at
         `,
-        [customerId, bill.id, applied, paymentMethod || "Cash", note || null],
+        [
+          customerId,
+          bill.id,
+          applied,
+          paymentMethod || "Cash",
+          note || null,
+        ],
       );
+
+      paymentAllocations.push({
+        paymentId: paymentResult.rows[0].id,
+        billId: bill.id,
+        amount: applied,
+        createdAt: paymentResult.rows[0].created_at,
+      });
 
       remainingPayment -= applied;
     }
@@ -2891,13 +2908,56 @@ app.post("/pay-due", async (req, res) => {
       [payAmount, pointsEarned, customerId],
     );
 
+    const updatedDue = Number(
+      updatedCustomer.rows[0].total_due || 0
+    );
+
     await client.query("COMMIT");
 
     res.json({
       message: "Due payment saved",
+
       customer: updatedCustomer.rows[0],
+
       paidAmount: payAmount,
+
+      previousDue,
+
+      remainingDue: updatedDue,
+
       pointsEarned,
+
+      paymentMethod: paymentMethod || "Cash",
+
+      note: note || "",
+
+      receipt: {
+        receiptNumber:
+          paymentAllocations.length > 0
+            ? `DP-${paymentAllocations[0].paymentId}`
+            : `DP-${Date.now()}`,
+
+        customerName: customer.name,
+
+        customerPhone: customer.phone,
+
+        previousDue,
+
+        paidAmount: payAmount,
+
+        remainingDue: updatedDue,
+
+        paymentMethod: paymentMethod || "Cash",
+
+        note: note || "",
+
+        createdAt:
+          paymentAllocations.length > 0
+            ? paymentAllocations[0].createdAt
+            : new Date(),
+
+        allocations: paymentAllocations,
+      },
     });
   } catch (err) {
     await client.query("ROLLBACK");
