@@ -1888,6 +1888,92 @@ app.post("/login", async (req, res) => {
   }
 });
 
+app.put("/change-admin-account", async (req, res) => {
+  try {
+    const {
+      currentUsername,
+      currentPassword,
+      newUsername,
+      newPassword,
+    } = req.body;
+
+    if (!currentUsername || !currentPassword) {
+      return res.status(400).json({
+        error: "Current username and password are required",
+      });
+    }
+
+    if (!newUsername && !newPassword) {
+      return res.status(400).json({
+        error: "Enter a new username or new password",
+      });
+    }
+
+    const currentUser = await db.query(
+      `
+      SELECT id, username, password, role
+      FROM users
+      WHERE username = $1
+        AND password = $2
+        AND role = 'admin'
+      `,
+      [currentUsername, currentPassword],
+    );
+
+    if (currentUser.rows.length === 0) {
+      return res.status(401).json({
+        error: "Current username or password is incorrect",
+      });
+    }
+
+    const adminId = currentUser.rows[0].id;
+
+    const usernameToSave =
+      newUsername?.trim() || currentUsername;
+
+    const passwordToSave =
+      newPassword || currentPassword;
+
+    const duplicate = await db.query(
+      `
+      SELECT id
+      FROM users
+      WHERE username = $1
+        AND id <> $2
+      `,
+      [usernameToSave, adminId],
+    );
+
+    if (duplicate.rows.length > 0) {
+      return res.status(409).json({
+        error: "Username already exists",
+      });
+    }
+
+    const updated = await db.query(
+      `
+      UPDATE users
+      SET username = $1,
+          password = $2
+      WHERE id = $3
+      RETURNING id, username, role, created_at
+      `,
+      [usernameToSave, passwordToSave, adminId],
+    );
+
+    res.json({
+      message: "Admin account updated successfully",
+      user: updated.rows[0],
+    });
+  } catch (err) {
+    console.log("CHANGE ADMIN ACCOUNT ERROR:", err);
+
+    res.status(500).json({
+      error: err.message,
+    });
+  }
+});
+
 app.post("/add-product", async (req, res) => {
   try {
     const { name, gender, category, subcategory, price, stock, cost } =
